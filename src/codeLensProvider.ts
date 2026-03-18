@@ -6,6 +6,7 @@ const FN_SIGNATURE = /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*[<(
 const RETURNS_RESULT = /->.*?(?:Result|Option)\s*</;
 
 interface LensData {
+  document: vscode.TextDocument;
   fnName: string;
   position: vscode.Position;
   key: string;
@@ -70,7 +71,7 @@ export class ResultCodeLensProvider implements vscode.CodeLensProvider {
       } else {
         // Not yet started: store data for resolveCodeLens and return a lens
         // WITHOUT a command so VS Code will call resolveCodeLens
-        this._pendingData.set(i, { fnName, position, key });
+        this._pendingData.set(i, { document, fnName, position, key });
         lenses.push(new vscode.CodeLens(range));
       }
     }
@@ -83,13 +84,10 @@ export class ResultCodeLensProvider implements vscode.CodeLensProvider {
     const data = this._pendingData.get(line);
     if (!data) { return lens; }
 
-    const { fnName, position, key } = data;
+    const { document, fnName, position, key } = data;
 
     // Mid-resolution re-entry: return with current step title as-is
     if (this._resolving.has(key)) { return lens; }
-
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) { return lens; }
 
     this._resolving.add(key);
 
@@ -98,7 +96,7 @@ export class ResultCodeLensProvider implements vscode.CodeLensProvider {
       this._onDidChangeCodeLenses.fire();
     };
 
-    const locations = await findHandlingLocations(editor.document, fnName, position, onProgress);
+    const locations = await findHandlingLocations(document, fnName, position, onProgress);
     const count = locations.length;
 
     const command: vscode.Command = {
@@ -106,7 +104,7 @@ export class ResultCodeLensProvider implements vscode.CodeLensProvider {
         ? '$(circle-slash) No result usages found'
         : `$(references) ${count} result ${count === 1 ? 'usage' : 'usages'} handled`,
       command: count > 0 ? 'errorvis.findResultUsages' : '',
-      arguments: [editor.document.uri, position]
+      arguments: [document.uri, position]
     };
 
     this._resolvedCmds.set(key, command);
