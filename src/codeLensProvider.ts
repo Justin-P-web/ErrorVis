@@ -8,13 +8,22 @@ const RETURNS_RESULT = /->.*?(?:Result|Option)\s*</;
 interface LensData {
   fnName: string;
   position: vscode.Position;
+  key: string;
 }
 
 export class ResultCodeLensProvider implements vscode.CodeLensProvider {
   private _onDidChangeCodeLenses = new vscode.EventEmitter<void>();
   readonly onDidChangeCodeLenses = this._onDidChangeCodeLenses.event;
 
+  // key = `${fnName}:${position.line}`
+  private _stepMessages  = new Map<string, string>();         // key → current step title
+  private _resolving     = new Set<string>();                 // keys currently being resolved
+  private _resolvedCmds  = new Map<string, vscode.Command>(); // key → final command (cache)
+
   refresh(): void {
+    this._resolvedCmds.clear();
+    this._stepMessages.clear();
+    this._resolving.clear();
     this._onDidChangeCodeLenses.fire();
   }
 
@@ -45,38 +54,61 @@ export class ResultCodeLensProvider implements vscode.CodeLensProvider {
       const col = line.text.indexOf(fnName);
       const position = new vscode.Position(i, col);
       const range = new vscode.Range(position, position);
+      const key = `${fnName}:${i}`;
 
-      lenses.push(new vscode.CodeLens(range, {
-        title: '$(loading~spin) Loading result usages…',
-        command: '',
-        arguments: [{ fnName, position } as LensData]
-      }));
+      if (this._resolvedCmds.has(key)) {
+        // Pre-resolved: VS Code won't call resolveCodeLens
+        lenses.push(new vscode.CodeLens(range, this._resolvedCmds.get(key)!));
+      } else {
+        const title = this._stepMessages.get(key)
+          ?? `$(loading~spin) Querying LSP for "${fnName}"…`;
+        lenses.push(new vscode.CodeLens(range, {
+          title,
+          command: '',
+          arguments: [{ fnName, position, key } as LensData]
+        }));
+      }
     }
 
     return lenses;
   }
 
   async resolveCodeLens(lens: vscode.CodeLens): Promise<vscode.CodeLens> {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) { return lens; }
-
     const data = lens.command?.arguments?.[0] as LensData | undefined;
     if (!data) { return lens; }
 
-    const { fnName, position } = data;
-    const document = editor.document;
+    const { fnName, position, key } = data;
 
-    const locations = await findHandlingLocations(document, fnName, position);
+    // Mid-resolution re-entry: return with current step title as-is
+    if (this._resolving.has(key)) { return lens; }
+
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) { return lens; }
+
+    this._resolving.add(key);
+
+    const onProgress = (step: string) => {
+      this._stepMessages.set(key, step);
+      this._onDidChangeCodeLenses.fire();
+    };
+
+    const locations = await findHandlingLocations(editor.document, fnName, position, onProgress);
     const count = locations.length;
 
-    lens.command = {
+    const command: vscode.Command = {
       title: count === 0
         ? '$(circle-slash) No result usages found'
         : `$(references) ${count} result ${count === 1 ? 'usage' : 'usages'} handled`,
       command: count > 0 ? 'errorvis.findResultUsages' : '',
-      arguments: [document.uri, position]
+      arguments: [editor.document.uri, position]
     };
 
+    this._resolvedCmds.set(key, command);
+    this._resolving.delete(key);
+    this._stepMessages.delete(key);
+    this._onDidChangeCodeLenses.fire(); // show final result via cache
+
+    lens.command = command;
     return lens;
   }
 }

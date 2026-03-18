@@ -31,6 +31,15 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     })
   );
+
+  // Invalidate resolved-lens cache when a Rust document is edited
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeTextDocument(e => {
+      if (e.document.languageId === 'rust') {
+        codeLensProvider?.refresh();
+      }
+    })
+  );
 }
 
 export function deactivate(): void { /* nothing to clean up */ }
