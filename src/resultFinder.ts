@@ -18,9 +18,14 @@ export type HandlingKind =
   | 'while_let'
   | 'check';
 
+// Optional function-call suffix, handling one level of argument nesting: foo(a, bar(b))
+const CALL_SUFFIX = '(?:\\([^()]*(?:\\([^()]*\\)[^()]*)*\\))?';
+
 // All Result/Option method chain handlers
-const METHOD_CHAIN_PATTERN = /\b(SYMBOL)\s*\.\s*(unwrap|expect|unwrap_or(?:_else|_default)?|map|and_then|or(?:_else)?|is_ok|is_err|ok|err|map_err|flatten|transpose)\s*[(\s;,)]/;
-const QUESTION_MARK_PATTERN = /\b(SYMBOL)\s*\?/;
+const METHOD_CHAIN_PATTERN = new RegExp(
+  `\\b(SYMBOL)${CALL_SUFFIX}\\s*\\.\\s*(unwrap|expect|unwrap_or(?:_else|_default)?|map|and_then|or(?:_else)?|is_ok|is_err|ok|err|map_err|flatten|transpose)\\s*[(\\s;,)]`
+);
+const QUESTION_MARK_PATTERN = new RegExp(`\\b(SYMBOL)${CALL_SUFFIX}\\s*\\?`);
 const MATCH_PATTERN = /\bmatch\s+\*{0,2}\s*(SYMBOL)\b/;
 const IF_LET_PATTERN = /\bif\s+let\s+(?:Ok|Err|Some|None)\s*(?:\([^)]*\))?\s*=\s*\*{0,2}\s*(SYMBOL)\b/;
 const WHILE_LET_PATTERN = /\bwhile\s+let\s+(?:Ok|Err|Some|None)\s*(?:\([^)]*\))?\s*=\s*\*{0,2}\s*(SYMBOL)\b/;
