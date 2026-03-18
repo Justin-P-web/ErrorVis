@@ -19,11 +19,13 @@ export class ResultCodeLensProvider implements vscode.CodeLensProvider {
   private _stepMessages  = new Map<string, string>();         // key → current step title
   private _resolving     = new Set<string>();                 // keys currently being resolved
   private _resolvedCmds  = new Map<string, vscode.Command>(); // key → final command (cache)
+  private _pendingData   = new Map<number, LensData>();       // line → data for resolveCodeLens
 
   refresh(): void {
     this._resolvedCmds.clear();
     this._stepMessages.clear();
     this._resolving.clear();
+    this._pendingData.clear();
     this._onDidChangeCodeLenses.fire();
   }
 
@@ -59,14 +61,17 @@ export class ResultCodeLensProvider implements vscode.CodeLensProvider {
       if (this._resolvedCmds.has(key)) {
         // Pre-resolved: VS Code won't call resolveCodeLens
         lenses.push(new vscode.CodeLens(range, this._resolvedCmds.get(key)!));
-      } else {
+      } else if (this._resolving.has(key)) {
+        // Resolution in progress: show loading title with a command so VS Code
+        // doesn't call resolveCodeLens again (it's already running)
         const title = this._stepMessages.get(key)
           ?? `$(loading~spin) Querying LSP for "${fnName}"…`;
-        lenses.push(new vscode.CodeLens(range, {
-          title,
-          command: '',
-          arguments: [{ fnName, position, key } as LensData]
-        }));
+        lenses.push(new vscode.CodeLens(range, { title, command: '' }));
+      } else {
+        // Not yet started: store data for resolveCodeLens and return a lens
+        // WITHOUT a command so VS Code will call resolveCodeLens
+        this._pendingData.set(i, { fnName, position, key });
+        lenses.push(new vscode.CodeLens(range));
       }
     }
 
@@ -74,7 +79,8 @@ export class ResultCodeLensProvider implements vscode.CodeLensProvider {
   }
 
   async resolveCodeLens(lens: vscode.CodeLens): Promise<vscode.CodeLens> {
-    const data = lens.command?.arguments?.[0] as LensData | undefined;
+    const line = lens.range.start.line;
+    const data = this._pendingData.get(line);
     if (!data) { return lens; }
 
     const { fnName, position, key } = data;
@@ -106,6 +112,7 @@ export class ResultCodeLensProvider implements vscode.CodeLensProvider {
     this._resolvedCmds.set(key, command);
     this._resolving.delete(key);
     this._stepMessages.delete(key);
+    this._pendingData.delete(line);
     this._onDidChangeCodeLenses.fire(); // show final result via cache
 
     lens.command = command;
