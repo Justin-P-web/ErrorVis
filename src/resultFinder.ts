@@ -69,11 +69,13 @@ function classifyLine(lineText: string, symbol: string): HandlingKind | null {
 export async function findHandlingLocations(
   document: vscode.TextDocument,
   symbolName: string,
-  position: vscode.Position
+  position: vscode.Position,
+  onProgress?: (step: string) => void
 ): Promise<HandlingLocation[]> {
   const results: HandlingLocation[] = [];
 
   // --- Tier 1: LSP references ---
+  onProgress?.(`$(loading~spin) Querying LSP for "${symbolName}"…`);
   let locations: vscode.Location[] | undefined;
   try {
     const raw = await vscode.commands.executeCommand<vscode.Location[]>(
@@ -107,6 +109,7 @@ export async function findHandlingLocations(
   }
 
   // --- Tier 2: regex scan of the current document ---
+  onProgress?.(`$(loading~spin) Scanning document for "${symbolName}"…`);
   const text = document.getText();
   const lines = text.split('\n');
   for (let i = 0; i < lines.length; i++) {
