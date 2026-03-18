@@ -1,0 +1,53 @@
+{
+  "name": "errorvis",
+  "displayName": "ErrorVis: Result Unwrap Navigator",
+  "description": "Navigate from any Result/Option variable or function to all places it is unwrapped or handled",
+  "version": "0.1.0",
+  "publisher": "Justin-P-web",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "keywords": ["rust", "result", "unwrap", "error handling", "navigation"],
+  "activationEvents": ["onLanguage:rust"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "errorvis.findResultUsages",
+        "title": "Find Result Usages",
+        "category": "ErrorVis"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "errorvis.findResultUsages",
+          "when": "resourceLangId == rust",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "ErrorVis",
+      "properties": {
+        "errorvis.enableCodeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show CodeLens annotations above Result/Option-returning functions"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}
