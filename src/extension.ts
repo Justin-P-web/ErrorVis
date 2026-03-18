@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { findHandlingLocations, kindLabel, HandlingLocation } from './resultFinder';
+import { findHandlingTree, kindLabel, HandlingLocation } from './resultFinder';
 import { ResultCodeLensProvider } from './codeLensProvider';
 
 let codeLensProvider: ResultCodeLensProvider | undefined;
@@ -71,7 +71,7 @@ async function findResultUsages(
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: `ErrorVis: Searching for "${symbolName}" usages…` },
     async () => {
-      const locations = await findHandlingLocations(document, symbolName, cursorPosition);
+      const locations = await findHandlingTree(document, symbolName, cursorPosition);
 
       if (locations.length === 0) {
         vscode.window.showInformationMessage(
@@ -99,17 +99,21 @@ async function showResultPicker(
   const items: PickItem[] = locations.map(loc => {
     const relativePath = vscode.workspace.asRelativePath(loc.uri);
     const lineNum = loc.range.start.line + 1;
+    const indent = '  '.repeat(loc.depth);
+    const viaPrefix = loc.via ? `↳ via ${loc.via}  ` : '';
     return {
-      label: kindLabel(loc.kind),
-      description: `${path.basename(relativePath)}:${lineNum}`,
-      detail: loc.lineText,
+      label: `${indent}${kindLabel(loc.kind)}`,
+      description: `${viaPrefix}${path.basename(relativePath)}:${lineNum}`,
+      detail: `${indent}${loc.lineText}`,
       location: loc,
       alwaysShow: true
     };
   });
 
+  const maxDepth = locations.reduce((m, l) => Math.max(m, l.depth), 0);
+  const levelLabel = maxDepth > 0 ? ` across ${maxDepth + 1} level(s)` : '';
   const pick = vscode.window.createQuickPick<PickItem>();
-  pick.title = `Result usages of "${symbolName}" — ${locations.length} found`;
+  pick.title = `Result usages of "${symbolName}" — ${locations.length} found${levelLabel}`;
   pick.items = items;
   pick.matchOnDescription = true;
   pick.matchOnDetail = true;
