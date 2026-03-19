@@ -146,12 +146,15 @@ export async function findHandlingLocations(
 
   if (locations && locations.length > 0) {
     for (const loc of locations) {
+      if (isTestOrExamplePath(loc.uri.fsPath)) { continue; }
+
       const doc = loc.uri.toString() === document.uri.toString()
         ? document
         : await tryOpenDocument(loc.uri);
       if (!doc) { continue; }
 
       const lineText = doc.lineAt(loc.range.start.line).text;
+      if (lineText.trimStart().startsWith('//')) { continue; }
       const kind = classifyLine(lineText, symbolName);
       if (kind !== null) {
         results.push({ uri: loc.uri, range: loc.range, lineText: lineText.trim(), kind });
@@ -168,6 +171,7 @@ export async function findHandlingLocations(
   const lines = text.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const lineText = lines[i];
+    if (lineText.trimStart().startsWith('//')) { continue; }
     const kind = classifyLine(lineText, symbolName);
     if (kind !== null) {
       // Locate the symbol on this line for precise range
@@ -403,9 +407,26 @@ function scanDocumentForResultFns(document: vscode.TextDocument): ScannedFn[] {
   let braceDepth = 0;
   let currentImpl: string | null = null;
   let implBraceDepth = 0;
+  let inCfgTest = false;
+  let cfgTestBraceDepth = 0;
+  let pendingCfgTest = false;
 
   for (let i = 0; i < document.lineCount; i++) {
     const text = document.lineAt(i).text;
+
+    // Detect #[cfg(test)] attribute
+    if (/^\s*#\[cfg\(test\)\]/.test(text)) {
+      pendingCfgTest = true;
+    }
+
+    // Detect mod block opening after a #[cfg(test)] attribute
+    if (pendingCfgTest && /\bmod\b/.test(text) && text.includes('{')) {
+      inCfgTest = true;
+      cfgTestBraceDepth = braceDepth;
+      pendingCfgTest = false;
+    } else if (pendingCfgTest && text.trim() !== '' && !/^\s*\/\//.test(text) && !/^\s*#/.test(text)) {
+      pendingCfgTest = false;
+    }
 
     // Detect impl block that opens on this line
     if (currentImpl === null && IMPL_LINE.test(text) && text.includes('{')) {
@@ -422,10 +443,18 @@ function scanDocumentForResultFns(document: vscode.TextDocument): ScannedFn[] {
       else if (ch === '}') { braceDepth--; }
     }
 
+    // Check if we've exited the cfg(test) block
+    if (inCfgTest && braceDepth <= cfgTestBraceDepth) {
+      inCfgTest = false;
+    }
+
     // Check if we've exited the impl block
     if (currentImpl !== null && braceDepth <= implBraceDepth) {
       currentImpl = null;
     }
+
+    // Skip functions inside test modules
+    if (inCfgTest) { continue; }
 
     // Check for a Result/Option-returning fn
     const fnMatch = FN_SIGNATURE.exec(text);
@@ -460,7 +489,7 @@ function scanDocumentForResultFns(document: vscode.TextDocument): ScannedFn[] {
 export async function buildGlobalResultTree(
   onProgress?: (message: string, increment: number) => void
 ): Promise<GlobalResultTree> {
-  const uris = await vscode.workspace.findFiles('**/*.rs', '**/target/**');
+  const uris = await vscode.workspace.findFiles('**/*.rs', '{**/target/**,**/tests/**,**/examples/**,**/benches/**}');
 
   // Phase 1: collect all Result/Option-returning functions across the workspace
   interface PendingFn extends ScannedFn {
@@ -520,6 +549,12 @@ export async function buildGlobalResultTree(
     generatedAt: new Date().toISOString(),
     groups: Array.from(groupMap.values())
   };
+}
+
+/** Returns true if the file path belongs to a test, example, or bench directory. */
+function isTestOrExamplePath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, '/');
+  return /\/(tests|examples|benches)\//.test(normalized);
 }
 
 async function tryOpenDocument(uri: vscode.Uri): Promise<vscode.TextDocument | undefined> {
