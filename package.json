@@ -2,7 +2,7 @@
   "name": "errorvis",
   "displayName": "ErrorVis: Result Unwrap Navigator",
   "description": "Navigate from any Result/Option variable or function to all places it is unwrapped or handled",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "Justin-P-web",
   "engines": {
     "vscode": "^1.85.0"

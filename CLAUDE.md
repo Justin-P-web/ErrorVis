@@ -5,7 +5,7 @@
 **ErrorVis** is a VSCode extension for Rust developers that provides visual navigation of `Result` and `Option` error handling. It adds CodeLens badges above functions returning `Result<T>` or `Option<T>`, and enables a "Find Result Usages" command that shows all locations where those values are unwrapped, propagated, or matched. A global "Export Result Tree" command lets users export a workspace-wide analysis to JSON or Markdown.
 
 - **Publisher:** Justin-P-web
-- **Version:** 0.2.0
+- **Version:** 0.2.1
 - **Language:** TypeScript 5.3+
 - **Target Language:** Rust (extension analyses Rust source files)
 - **VSCode Engine:** ^1.85.0
