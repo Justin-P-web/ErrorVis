@@ -29,11 +29,13 @@ const METHOD_CHAIN_PATTERN = new RegExp(
   `\\b(SYMBOL)${CALL_SUFFIX}\\s*\\.\\s*(unwrap|expect|unwrap_or(?:_else|_default)?|map|and_then|or(?:_else)?|is_ok|is_err|ok|err|map_err|flatten|transpose)\\s*[(\\s;,)]`
 );
 const QUESTION_MARK_PATTERN = new RegExp(`\\b(SYMBOL)${CALL_SUFFIX}\\s*\\?`);
-const RETURN_PATTERN = new RegExp(`\\breturn\\s+(?:\\w+(?:\\.\\w+)*\\.)?\\*{0,2}\\s*(SYMBOL)${CALL_SUFFIX}\\s*;?`);
-const DIRECT_RETURN_PATTERN = new RegExp(`^\\s*(?:\\w+(?:\\.\\w+)*\\.)?\\*{0,2}\\s*(SYMBOL)${CALL_SUFFIX}\\s*$`);
-const MATCH_PATTERN = new RegExp(`\\bmatch\\s+(?:\\w+(?:\\.\\w+)*\\.)?\\*{0,2}\\s*(SYMBOL)\\b${CALL_SUFFIX}`);
-const IF_LET_PATTERN = new RegExp(`\\bif\\s+let\\s+(?:Ok|Err|Some|None)\\s*(?:\\([^)]*\\))?\\s*=\\s*(?:\\w+(?:\\.\\w+)*\\.)?\\*{0,2}\\s*(SYMBOL)\\b${CALL_SUFFIX}`);
-const WHILE_LET_PATTERN = new RegExp(`\\bwhile\\s+let\\s+(?:Ok|Err|Some|None)\\s*(?:\\([^)]*\\))?\\s*=\\s*(?:\\w+(?:\\.\\w+)*\\.)?\\*{0,2}\\s*(SYMBOL)\\b${CALL_SUFFIX}`);
+// Optional path prefix: handles both dot-notation (obj.field.) and namespace paths (module::sub::)
+const PATH_PREFIX = '(?:(?:\\w+)(?:::|\\.))+';
+const RETURN_PATTERN = new RegExp(`\\breturn\\s+(?:${PATH_PREFIX})?\\*{0,2}\\s*(SYMBOL)${CALL_SUFFIX}\\s*;?`);
+const DIRECT_RETURN_PATTERN = new RegExp(`^\\s*(?:${PATH_PREFIX})?\\*{0,2}\\s*(SYMBOL)${CALL_SUFFIX}\\s*$`);
+const MATCH_PATTERN = new RegExp(`\\bmatch\\s+(?:${PATH_PREFIX})?\\*{0,2}\\s*(SYMBOL)\\b${CALL_SUFFIX}`);
+const IF_LET_PATTERN = new RegExp(`\\bif\\s+let\\s+(?:Ok|Err|Some|None)\\s*(?:\\([^)]*\\))?\\s*=\\s*(?:${PATH_PREFIX})?\\*{0,2}\\s*(SYMBOL)\\b${CALL_SUFFIX}`);
+const WHILE_LET_PATTERN = new RegExp(`\\bwhile\\s+let\\s+(?:Ok|Err|Some|None)\\s*(?:\\([^)]*\\))?\\s*=\\s*(?:${PATH_PREFIX})?\\*{0,2}\\s*(SYMBOL)\\b${CALL_SUFFIX}`);
 
 const MAX_DEPTH = 10;
 

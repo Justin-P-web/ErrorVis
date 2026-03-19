@@ -274,6 +274,45 @@ describe('classifyLine()', () => {
     });
   });
 
+  // ── namespace paths (module::function) ────────────────────────────────────
+  describe('namespace paths', () => {
+    it('detects question_mark with namespace prefix', () => {
+      assertKind('    let x = module::get_result()?;', 'get_result', 'question_mark');
+    });
+
+    it('detects return with namespace prefix', () => {
+      assertKind('    return module::get_result();', 'get_result', 'return');
+    });
+
+    it('detects implicit return with namespace prefix', () => {
+      assertKind('    module::get_value()', 'get_value', 'return');
+    });
+
+    it('detects implicit return with multi-segment namespace', () => {
+      assertKind('    crate::module::get_value()', 'get_value', 'return');
+    });
+
+    it('detects match with namespace prefix', () => {
+      assertKind('    match module::get_result() {', 'get_result', 'match');
+    });
+
+    it('detects match with multi-segment namespace', () => {
+      assertKind('    match crate::module::get_result() {', 'get_result', 'match');
+    });
+
+    it('detects if_let with namespace prefix', () => {
+      assertKind('    if let Ok(v) = module::get_result() {', 'get_result', 'if_let');
+    });
+
+    it('detects while_let with namespace prefix', () => {
+      assertKind('    while let Some(v) = module::next() {', 'next', 'while_let');
+    });
+
+    it('detects unwrap with namespace-called function', () => {
+      assertKind('    let v = module::get_result().unwrap();', 'get_result', 'unwrap');
+    });
+  });
+
   // ── special characters in symbol name ─────────────────────────────────────
   describe('symbol name escaping', () => {
     it('handles symbols containing regex-special characters safely', () => {
