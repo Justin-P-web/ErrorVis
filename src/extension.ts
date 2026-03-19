@@ -155,7 +155,7 @@ async function exportResultTree(): Promise<void> {
   }
 }
 
-export interface CallSiteEntry { fnLabel: string; kind: HandlingKind; via?: string }
+export interface CallSiteEntry { fnLabel: string; kind: HandlingKind; via?: string; fnFilePath: string; fnLine: number }
 export interface CallSite { filePath: string; line: number; lineText: string; entries: CallSiteEntry[] }
 
 export function buildCallSiteIndex(tree: GlobalResultTree): Map<string, CallSite> {
@@ -170,7 +170,7 @@ export function buildCallSiteIndex(tree: GlobalResultTree): Map<string, CallSite
         if (!map.has(key)) {
           map.set(key, { filePath: relPath, line, lineText: h.lineText, entries: [] });
         }
-        map.get(key)!.entries.push({ fnLabel, kind: h.kind, via: h.via });
+        map.get(key)!.entries.push({ fnLabel, kind: h.kind, via: h.via, fnFilePath: fn.filePath, fnLine: fn.line });
       }
     }
   }
@@ -273,16 +273,33 @@ function formatMermaidForFile(filePath: string, groups: ResultGroup[]): string {
     }
   }
 
-  // Collect all unique call-site locations keyed by filePath:line
-  const locationNodes = new Map<string, { nodeId: string; locFilePath: string; line: number; lineText: string }>();
+  // Track node IDs already defined as source or passthrough — handler nodes reuse these
+  const definedFnIds = new Set<string>();
+  for (const fn of sourceFns) { definedFnIds.add(safeFnId(fn)); }
+  for (const fn of passthroughFns) { definedFnIds.add(safeFnId(fn)); }
+
+  // Collect handler nodes for non-propagating locations, keyed by inFunction name
+  // (or filePath:line as fallback when inFunction is unavailable)
+  type HandlerNode = { nodeId: string; label: string; locFilePath: string };
+  const handlerNodes = new Map<string, HandlerNode>();
   for (const group of groups) {
     for (const fn of group.functions) {
       for (const loc of fn.handling) {
+        if (loc.kind === 'question_mark' || loc.kind === 'return') { continue; }
         const locFilePath = vscode.workspace.asRelativePath(loc.uri);
-        const line = loc.range.start.line + 1;
-        const key = `${locFilePath}:${line}`;
-        if (!locationNodes.has(key)) {
-          locationNodes.set(key, { nodeId: safeLocId(locFilePath, line), locFilePath, line, lineText: loc.lineText });
+        if (loc.inFunction) {
+          const key = loc.inFunction;
+          if (!handlerNodes.has(key)) {
+            const label = loc.inStruct ? `${loc.inStruct}::${loc.inFunction}` : loc.inFunction;
+            handlerNodes.set(key, { nodeId: safeFnId(loc.inFunction), label, locFilePath });
+          }
+        } else {
+          const line = loc.range.start.line + 1;
+          const key = `${locFilePath}:${line}`;
+          if (!handlerNodes.has(key)) {
+            const shortFile = path.basename(locFilePath);
+            handlerNodes.set(key, { nodeId: safeLocId(locFilePath, line), label: `${shortFile}:${line}`, locFilePath });
+          }
         }
       }
     }
@@ -304,14 +321,26 @@ function formatMermaidForFile(filePath: string, groups: ResultGroup[]): string {
       const srcId = safeFnId(fn.fnName);
       for (const loc of fn.handling) {
         const locFilePath = vscode.workspace.asRelativePath(loc.uri);
-        const line = loc.range.start.line + 1;
-        const locNode = locationNodes.get(`${locFilePath}:${line}`)!;
+        // The immediate upstream node: via function if present, otherwise the source itself
+        const immediateId = loc.via ? safeFnId(loc.via) : srcId;
+
+        // Always emit the via-chain edge
         if (loc.via) {
-          const viaId = safeFnId(loc.via);
-          addEdge(srcId, viaId);
-          addEdge(viaId, locNode.nodeId);
+          addEdge(srcId, safeFnId(loc.via));
+        }
+
+        if (loc.kind === 'question_mark' || loc.kind === 'return') {
+          // Propagation point: connect immediate node to the function that contains this propagation
+          if (loc.inFunction) {
+            addEdge(immediateId, safeFnId(loc.inFunction));
+          }
         } else {
-          addEdge(srcId, locNode.nodeId);
+          // Terminal handler: connect immediate node to the handler function node
+          const handlerKey = loc.inFunction ?? `${locFilePath}:${loc.range.start.line + 1}`;
+          const handlerNode = handlerNodes.get(handlerKey);
+          if (handlerNode) {
+            addEdge(immediateId, handlerNode.nodeId);
+          }
         }
       }
     }
@@ -369,25 +398,24 @@ function formatMermaidForFile(filePath: string, groups: ResultGroup[]): string {
     }
   }
 
-  // Group call-site nodes by their file into subgraphs
-  type LocNode = { nodeId: string; locFilePath: string; line: number; lineText: string };
-  const byLocFile = new Map<string, LocNode[]>();
-  for (const node of locationNodes.values()) {
+  // Group handler function nodes by their file, only emit nodes not already defined as source/passthrough
+  type HandlerFileEntry = { nodeId: string; label: string };
+  const byLocFile = new Map<string, HandlerFileEntry[]>();
+  for (const node of handlerNodes.values()) {
+    if (definedFnIds.has(node.nodeId)) { continue; } // already defined as source or passthrough
     const arr = byLocFile.get(node.locFilePath) ?? [];
-    arr.push(node);
+    arr.push({ nodeId: node.nodeId, label: node.label });
     byLocFile.set(node.locFilePath, arr);
   }
 
-  if (locationNodes.size > 0) {
+  if (byLocFile.size > 0) {
     lines.push('');
-    lines.push('  %% Call-site location nodes');
+    lines.push('  %% Handler function nodes');
     for (const [locFile, nodes] of byLocFile) {
-      const sgId = 'sg_locs_' + locFile.replace(/[^a-zA-Z0-9]/g, '_');
-      const shortFile = path.basename(locFile);
+      const sgId = 'sg_handlers_' + locFile.replace(/[^a-zA-Z0-9]/g, '_');
       lines.push(`  subgraph ${sgId} ["${locFile}"]`);
-      for (const node of nodes.sort((a, b) => a.line - b.line)) {
-        const label = `${shortFile}:${node.line}`;
-        lines.push(`    ${node.nodeId}["${label}"]:::callsite`);
+      for (const node of nodes) {
+        lines.push(`    ${node.nodeId}["${node.label}"]:::callsite`);
       }
       lines.push('  end');
     }
@@ -432,14 +460,18 @@ export function formatMarkdown(tree: GlobalResultTree): string {
     }
   }
 
-  // Section 2: inverted view — grouped by handling call site
+  // Section 2: inverted view — grouped by handling call site (propagation-only sites excluded)
   const callSites = buildCallSiteIndex(tree);
   if (callSites.size > 0) {
     lines.push('---', '', '## Handling by Call Site', '');
 
-    // Group call sites by file
+    // Group call sites by file, skipping sites with only propagating entries
     const byFile = new Map<string, CallSite[]>();
     for (const site of callSites.values()) {
+      const hasRealHandling = site.entries.some(
+        e => e.kind !== 'question_mark' && e.kind !== 'return'
+      );
+      if (!hasRealHandling) { continue; }
       const list = byFile.get(site.filePath) ?? [];
       list.push(site);
       byFile.set(site.filePath, list);
@@ -449,12 +481,13 @@ export function formatMarkdown(tree: GlobalResultTree): string {
     for (const filePath of sortedFiles) {
       const sites = byFile.get(filePath)!.sort((a, b) => a.line - b.line);
       lines.push(`### \`${filePath}\``, '');
-      lines.push('| Line | Handler | Function |');
-      lines.push('|------|---------|----------|');
+      lines.push('| Line | Handler | Origin Function |');
+      lines.push('|------|---------|-----------------|');
       for (const site of sites) {
         for (const entry of site.entries) {
+          if (entry.kind === 'question_mark' || entry.kind === 'return') { continue; }
           const via = entry.via ? ` ↳ via \`${entry.via}\`` : '';
-          lines.push(`| ${site.line} | \`${kindLabelPlain(entry.kind)}\`${via} | \`${entry.fnLabel}\` |`);
+          lines.push(`| ${site.line} | \`${kindLabelPlain(entry.kind)}\`${via} | \`${entry.fnLabel}\` — \`${entry.fnFilePath}:${entry.fnLine}\` |`);
         }
       }
       lines.push('');
