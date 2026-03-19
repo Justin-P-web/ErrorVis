@@ -100,7 +100,9 @@ async function exportResultTree(): Promise<void> {
 
   const jsonPath = saveUri.fsPath;
   const mdPath = jsonPath.replace(/\.json$/i, '') + '.md';
+  const mmdPath = jsonPath.replace(/\.json$/i, '') + '.mmd';
   const mdUri = vscode.Uri.file(mdPath);
+  const mmdUri = vscode.Uri.file(mmdPath);
 
   let tree: GlobalResultTree | undefined;
   await vscode.window.withProgress(
@@ -120,14 +122,18 @@ async function exportResultTree(): Promise<void> {
   const encoder = new TextEncoder();
   await vscode.workspace.fs.writeFile(saveUri, encoder.encode(formatJson(tree)));
   await vscode.workspace.fs.writeFile(mdUri, encoder.encode(formatMarkdown(tree)));
+  await vscode.workspace.fs.writeFile(mmdUri, encoder.encode(formatMermaid(tree)));
 
   const totalFns = tree.groups.reduce((n, g) => n + g.functions.length, 0);
   const action = await vscode.window.showInformationMessage(
     `ErrorVis: Result tree exported — ${totalFns} function(s) across ${tree.groups.length} group(s).`,
+    'Open Mermaid',
     'Open Markdown',
     'Open JSON'
   );
-  if (action === 'Open Markdown') {
+  if (action === 'Open Mermaid') {
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(mmdUri));
+  } else if (action === 'Open Markdown') {
     await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(mdUri));
   } else if (action === 'Open JSON') {
     await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(saveUri));
@@ -171,6 +177,124 @@ function formatJson(tree: GlobalResultTree): string {
       }))
     }))
   }, null, 2);
+}
+
+function formatMermaid(tree: GlobalResultTree): string {
+  const safeId = (name: string) =>
+    'fn_' + name.replace(/[^a-zA-Z0-9]/g, '_');
+
+  // Collect all source function names (Result/Option-returning fns in the tree)
+  const sourceFns = new Set<string>();
+  for (const group of tree.groups) {
+    for (const fn of group.functions) {
+      sourceFns.add(fn.fnName);
+    }
+  }
+
+  // Collect pass-through functions: appear in loc.via but are not themselves sources
+  const passthroughFns = new Set<string>();
+  for (const group of tree.groups) {
+    for (const fn of group.functions) {
+      for (const loc of fn.handling) {
+        if (loc.via && !sourceFns.has(loc.via)) {
+          passthroughFns.add(loc.via);
+        }
+      }
+    }
+  }
+
+  // Build edge map: (fromId, toId) → { label, count }
+  const edgeMap = new Map<string, { fromId: string; toId: string; label: string; count: number }>();
+  const addEdge = (fromId: string, toId: string, label: string) => {
+    const key = `${fromId}→${toId}`;
+    const existing = edgeMap.get(key);
+    if (existing) {
+      existing.count++;
+    } else {
+      edgeMap.set(key, { fromId, toId, label, count: 1 });
+    }
+  };
+
+  // Collect which terminal handler kinds are actually used
+  const usedKinds = new Set<HandlingKind>();
+
+  for (const group of tree.groups) {
+    for (const fn of group.functions) {
+      const srcId = safeId(fn.fnName);
+      for (const loc of fn.handling) {
+        if (loc.via) {
+          // source → pass-through (propagation edge)
+          const viaId = safeId(loc.via);
+          addEdge(srcId, viaId, '?');
+          // pass-through → terminal handler
+          addEdge(viaId, `h_${loc.kind}`, kindLabelPlain(loc.kind));
+        } else {
+          // source → terminal handler (direct)
+          addEdge(srcId, `h_${loc.kind}`, kindLabelPlain(loc.kind));
+        }
+        usedKinds.add(loc.kind);
+      }
+    }
+  }
+
+  const lines: string[] = [
+    '%%{init: {"theme":"neutral"}}%%',
+    'graph TD',
+    '  classDef source fill:#4A90D9,stroke:#2C5F8A,color:#fff',
+    '  classDef passthrough fill:#F5A623,stroke:#C67D0E,color:#333,stroke-dasharray:5 5',
+    '  classDef danger fill:#C0392B,stroke:#922B21,color:#fff',
+    '  classDef safe fill:#27AE60,stroke:#1E8449,color:#fff',
+    '  classDef combinator fill:#2980B9,stroke:#1A5276,color:#fff',
+    '  classDef check fill:#7F8C8D,stroke:#566573,color:#fff',
+    '  classDef propagate fill:#8E44AD,stroke:#6C3483,color:#fff',
+    '',
+    '  %% Source functions (return Result/Option)',
+  ];
+
+  for (const fn of sourceFns) {
+    lines.push(`  ${safeId(fn)}["${fn}"]:::source`);
+  }
+
+  if (passthroughFns.size > 0) {
+    lines.push('');
+    lines.push('  %% Pass-through functions (propagate without handling)');
+    for (const fn of passthroughFns) {
+      lines.push(`  ${safeId(fn)}(["${fn}"]):::passthrough`);
+    }
+  }
+
+  // Terminal handler node definitions
+  // Shape and class per kind
+  const kindDef: Record<HandlingKind, { shape: [string, string]; cls: string }> = {
+    unwrap:         { shape: ['{{', '}}'], cls: 'danger' },
+    expect:         { shape: ['{{', '}}'], cls: 'danger' },
+    unwrap_or:      { shape: ['{', '}'],   cls: 'safe' },
+    map_combinator: { shape: ['[/', '/]'], cls: 'combinator' },
+    question_mark:  { shape: ['([', '])'], cls: 'propagate' },
+    return:         { shape: ['([', '])'], cls: 'propagate' },
+    match:          { shape: ['{', '}'],   cls: 'safe' },
+    if_let:         { shape: ['{', '}'],   cls: 'safe' },
+    while_let:      { shape: ['{', '}'],   cls: 'safe' },
+    check:          { shape: ['[', ']'],   cls: 'check' },
+  };
+
+  lines.push('');
+  lines.push('  %% Terminal handling nodes');
+  for (const kind of usedKinds) {
+    const { shape: [open, close], cls } = kindDef[kind];
+    const label = kindLabelPlain(kind);
+    lines.push(`  h_${kind}${open}"${label}"${close}:::${cls}`);
+  }
+
+  // Edges
+  lines.push('');
+  lines.push('  %% Error flow edges');
+  for (const { fromId, toId, label, count } of edgeMap.values()) {
+    const edgeLabel = count > 1 ? `${label} ×${count}` : label;
+    lines.push(`  ${fromId} -->|"${edgeLabel}"| ${toId}`);
+  }
+
+  return lines.join('\n');
 }
 
 function formatMarkdown(tree: GlobalResultTree): string {
