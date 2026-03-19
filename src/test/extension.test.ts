@@ -5,6 +5,7 @@ import {
   formatJson,
   formatMarkdown,
   formatMermaid,
+  MermaidDiagram,
 } from '../extension';
 import { GlobalResultTree, HandlingKind } from '../resultFinder';
 
@@ -416,29 +417,64 @@ describe('formatMarkdown()', () => {
 // formatMermaid
 // ---------------------------------------------------------------------------
 describe('formatMermaid()', () => {
+  it('returns one diagram per unique source file', () => {
+    const diagrams = formatMermaid(makeSimpleTree());
+    assert.strictEqual(diagrams.length, 1);
+    assert.strictEqual(diagrams[0].filePath, 'src/main.rs');
+  });
+
+  it('returns separate diagrams for different source files', () => {
+    const tree: GlobalResultTree = {
+      generatedAt: '2026-03-19T00:00:00.000Z',
+      groups: [
+        { kind: 'file', label: 'src/main.rs', filePath: 'src/main.rs',
+          functions: [{ fnName: 'fn_a', filePath: 'src/main.rs', line: 1,
+            handling: [makeHandling('unwrap', 'src/caller.rs', 5)] }] },
+        { kind: 'file', label: 'src/lib.rs', filePath: 'src/lib.rs',
+          functions: [{ fnName: 'fn_b', filePath: 'src/lib.rs', line: 1,
+            handling: [makeHandling('match', 'src/caller.rs', 10)] }] },
+      ],
+    };
+    const diagrams = formatMermaid(tree);
+    assert.strictEqual(diagrams.length, 2);
+    const paths = diagrams.map((d: MermaidDiagram) => d.filePath).sort();
+    assert.deepStrictEqual(paths, ['src/lib.rs', 'src/main.rs']);
+  });
+
   it('starts with the Mermaid init directive', () => {
-    const mmd = formatMermaid(makeSimpleTree());
+    const mmd = formatMermaid(makeSimpleTree())[0].content;
     assert.ok(mmd.startsWith('%%{init:'), 'should start with %%{init:');
   });
 
   it('declares graph TD', () => {
-    const mmd = formatMermaid(makeSimpleTree());
+    const mmd = formatMermaid(makeSimpleTree())[0].content;
     assert.ok(mmd.includes('graph TD'));
   });
 
   it('emits classDef for source and danger styles', () => {
-    const mmd = formatMermaid(makeSimpleTree());
+    const mmd = formatMermaid(makeSimpleTree())[0].content;
     assert.ok(mmd.includes('classDef source'));
     assert.ok(mmd.includes('classDef danger'));
   });
 
+  it('includes the file path as a comment in the diagram', () => {
+    const mmd = formatMermaid(makeSimpleTree())[0].content;
+    assert.ok(mmd.includes('%% src/main.rs'), 'should include file path comment');
+  });
+
+  it('wraps all source nodes in a file-level subgraph', () => {
+    const mmd = formatMermaid(makeSimpleTree())[0].content;
+    assert.ok(mmd.includes('subgraph'), 'should always include a file subgraph');
+    assert.ok(mmd.includes('"src/main.rs"'), 'file subgraph label should be the file path');
+  });
+
   it('emits a source node for each function', () => {
-    const mmd = formatMermaid(makeSimpleTree());
+    const mmd = formatMermaid(makeSimpleTree())[0].content;
     assert.ok(mmd.includes('fn_parse_config["parse_config"]:::source'));
   });
 
   it('emits a terminal handler node for each used kind', () => {
-    const mmd = formatMermaid(makeSimpleTree());
+    const mmd = formatMermaid(makeSimpleTree())[0].content;
     // unwrap and match are both used
     assert.ok(mmd.includes('h_unwrap'), 'should have unwrap handler node');
     assert.ok(mmd.includes('h_match'),  'should have match handler node');
@@ -447,31 +483,35 @@ describe('formatMermaid()', () => {
   });
 
   it('emits edges from source to terminal handlers', () => {
-    const mmd = formatMermaid(makeSimpleTree());
+    const mmd = formatMermaid(makeSimpleTree())[0].content;
     assert.ok(mmd.includes('fn_parse_config -->'));
   });
 
-  it('wraps a struct group with 2+ functions in a subgraph block', () => {
-    const mmd = formatMermaid(makeStructTree());
-    assert.ok(mmd.includes('subgraph'), 'should include subgraph keyword');
-    // Both methods should be indented inside the subgraph
+  it('wraps struct functions in a nested struct subgraph inside the file subgraph', () => {
+    const mmd = formatMermaid(makeStructTree())[0].content;
+    // Outer file subgraph
+    assert.ok(mmd.includes('"src/config.rs"'), 'should include file subgraph');
+    // Nested struct subgraph with struct label
+    assert.ok(mmd.includes('"Config"'), 'should include struct subgraph');
+    // Both methods should appear
     assert.ok(mmd.includes('fn_load["load"]:::source'));
     assert.ok(mmd.includes('fn_save["save"]:::source'));
   });
 
-  it('does NOT wrap a single-function group in a subgraph', () => {
-    const mmd = formatMermaid(makeSimpleTree());
-    assert.ok(!mmd.includes('subgraph'), 'single-function group should not get a subgraph');
+  it('does NOT add a struct subgraph for a plain file-kind group', () => {
+    const mmd = formatMermaid(makeSimpleTree())[0].content;
+    // Should still have the file subgraph, but not a separate struct subgraph
+    assert.ok(!mmd.includes('"src/main.rs"\n    subgraph'), 'no nested struct subgraph for file-kind group');
   });
 
   it('emits passthrough nodes for via-propagated functions', () => {
-    const mmd = formatMermaid(makePropagatedTree());
+    const mmd = formatMermaid(makePropagatedTree())[0].content;
     assert.ok(mmd.includes('fn_process_file'), 'should emit passthrough node');
     assert.ok(mmd.includes(':::passthrough'));
   });
 
   it('emits propagation edge from source to passthrough', () => {
-    const mmd = formatMermaid(makePropagatedTree());
+    const mmd = formatMermaid(makePropagatedTree())[0].content;
     assert.ok(mmd.includes('fn_read_file -->|"?"| fn_process_file'));
   });
 
@@ -497,7 +537,7 @@ describe('formatMermaid()', () => {
         },
       ],
     };
-    const mmd = formatMermaid(tree);
+    const mmd = formatMermaid(tree)[0].content;
     // Two unwrap edges should be merged into "×2"
     assert.ok(mmd.includes('×2'), 'repeated edges should show ×N count');
   });
