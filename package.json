@@ -2,7 +2,7 @@
   "name": "errorvis",
   "displayName": "ErrorVis: Result Unwrap Navigator",
   "description": "Navigate from any Result/Option variable or function to all places it is unwrapped or handled",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "Justin-P-web",
   "engines": {
     "vscode": "^1.85.0"
@@ -34,7 +34,7 @@
         {
           "command": "errorvis.findResultUsages",
           "when": "resourceLangId == rust",
-          "group": "navigation"
+          "group": "navigation@5.5"
         }
       ]
     },
