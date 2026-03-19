@@ -145,6 +145,9 @@ export async function findHandlingLocations(
   }
 
   if (locations && locations.length > 0) {
+    // Cache cfg(test) line sets per document URI to avoid repeated scans
+    const cfgTestCache = new Map<string, Set<number>>();
+
     for (const loc of locations) {
       if (isTestOrExamplePath(loc.uri.fsPath)) { continue; }
 
@@ -152,6 +155,14 @@ export async function findHandlingLocations(
         ? document
         : await tryOpenDocument(loc.uri);
       if (!doc) { continue; }
+
+      const uriKey = loc.uri.toString();
+      if (!cfgTestCache.has(uriKey)) {
+        const docLines: string[] = [];
+        for (let i = 0; i < doc.lineCount; i++) { docLines.push(doc.lineAt(i).text); }
+        cfgTestCache.set(uriKey, buildCfgTestLineSet(docLines));
+      }
+      if (cfgTestCache.get(uriKey)!.has(loc.range.start.line)) { continue; }
 
       const lineText = doc.lineAt(loc.range.start.line).text;
       if (lineText.trimStart().startsWith('//')) { continue; }
@@ -169,7 +180,9 @@ export async function findHandlingLocations(
   onProgress?.(`$(loading~spin) Scanning document for "${symbolName}"…`);
   const text = document.getText();
   const lines = text.split('\n');
+  const cfgTestLines = buildCfgTestLineSet(lines);
   for (let i = 0; i < lines.length; i++) {
+    if (cfgTestLines.has(i)) { continue; }
     const lineText = lines[i];
     if (lineText.trimStart().startsWith('//')) { continue; }
     const kind = classifyLine(lineText, symbolName);
@@ -404,29 +417,18 @@ interface ScannedFn {
 /** Scans a document and returns all Result/Option-returning functions with their impl context. */
 function scanDocumentForResultFns(document: vscode.TextDocument): ScannedFn[] {
   const results: ScannedFn[] = [];
+  const lines: string[] = [];
+  for (let i = 0; i < document.lineCount; i++) {
+    lines.push(document.lineAt(i).text);
+  }
+  const cfgTestLines = buildCfgTestLineSet(lines);
+
   let braceDepth = 0;
   let currentImpl: string | null = null;
   let implBraceDepth = 0;
-  let inCfgTest = false;
-  let cfgTestBraceDepth = 0;
-  let pendingCfgTest = false;
 
-  for (let i = 0; i < document.lineCount; i++) {
-    const text = document.lineAt(i).text;
-
-    // Detect #[cfg(test)] attribute
-    if (/^\s*#\[cfg\(test\)\]/.test(text)) {
-      pendingCfgTest = true;
-    }
-
-    // Detect mod block opening after a #[cfg(test)] attribute
-    if (pendingCfgTest && /\bmod\b/.test(text) && text.includes('{')) {
-      inCfgTest = true;
-      cfgTestBraceDepth = braceDepth;
-      pendingCfgTest = false;
-    } else if (pendingCfgTest && text.trim() !== '' && !/^\s*\/\//.test(text) && !/^\s*#/.test(text)) {
-      pendingCfgTest = false;
-    }
+  for (let i = 0; i < lines.length; i++) {
+    const text = lines[i];
 
     // Detect impl block that opens on this line
     if (currentImpl === null && IMPL_LINE.test(text) && text.includes('{')) {
@@ -443,18 +445,13 @@ function scanDocumentForResultFns(document: vscode.TextDocument): ScannedFn[] {
       else if (ch === '}') { braceDepth--; }
     }
 
-    // Check if we've exited the cfg(test) block
-    if (inCfgTest && braceDepth <= cfgTestBraceDepth) {
-      inCfgTest = false;
-    }
-
     // Check if we've exited the impl block
     if (currentImpl !== null && braceDepth <= implBraceDepth) {
       currentImpl = null;
     }
 
     // Skip functions inside test modules
-    if (inCfgTest) { continue; }
+    if (cfgTestLines.has(i)) { continue; }
 
     // Check for a Result/Option-returning fn
     const fnMatch = FN_SIGNATURE.exec(text);
@@ -555,6 +552,49 @@ export async function buildGlobalResultTree(
 function isTestOrExamplePath(filePath: string): boolean {
   const normalized = filePath.replace(/\\/g, '/');
   return /\/(tests|examples|benches)\//.test(normalized);
+}
+
+/**
+ * Returns a Set of line indices (0-based) that fall inside `#[cfg(test)]` mod blocks.
+ * Works on a plain array of line strings so it can be used without a vscode.TextDocument.
+ */
+export function buildCfgTestLineSet(lines: string[]): Set<number> {
+  const testLines = new Set<number>();
+  let braceDepth = 0;
+  let inCfgTest = false;
+  let cfgTestBraceDepth = 0;
+  let pendingCfgTest = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const text = lines[i];
+
+    if (/^\s*#\[cfg\(test\)\]/.test(text)) {
+      pendingCfgTest = true;
+    }
+
+    if (pendingCfgTest && /\bmod\b/.test(text) && text.includes('{')) {
+      inCfgTest = true;
+      cfgTestBraceDepth = braceDepth;
+      pendingCfgTest = false;
+    } else if (pendingCfgTest && text.trim() !== '' && !/^\s*\/\//.test(text) && !/^\s*#/.test(text)) {
+      pendingCfgTest = false;
+    }
+
+    for (const ch of text) {
+      if (ch === '{') { braceDepth++; }
+      else if (ch === '}') { braceDepth--; }
+    }
+
+    if (inCfgTest && braceDepth <= cfgTestBraceDepth) {
+      inCfgTest = false;
+    }
+
+    if (inCfgTest) {
+      testLines.add(i);
+    }
+  }
+
+  return testLines;
 }
 
 async function tryOpenDocument(uri: vscode.Uri): Promise<vscode.TextDocument | undefined> {
