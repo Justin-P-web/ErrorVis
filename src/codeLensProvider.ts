@@ -109,10 +109,13 @@ export class ResultCodeLensProvider implements vscode.CodeLensProvider {
     const count = locations.length;
 
     const retries = this._retryCount.get(key) ?? 0;
-    if (!lspAvailable && count === 0 && retries < MAX_RETRY_COUNT) {
-      // rust-analyzer hasn't loaded yet — show a transient placeholder and schedule a retry
+    if (count === 0 && retries < MAX_RETRY_COUNT) {
+      // rust-analyzer hasn't finished loading/indexing yet — show a transient placeholder and schedule a retry
+      const waitingTitle = lspAvailable
+        ? '$(sync~spin) Waiting for rust-analyzer to index…'
+        : '$(sync~spin) Waiting for rust-analyzer…';
       const waitingCommand: vscode.Command = {
-        title: '$(sync~spin) Waiting for rust-analyzer…',
+        title: waitingTitle,
         command: ''
       };
       this._resolvedCmds.set(key, waitingCommand);
