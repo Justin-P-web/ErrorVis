@@ -140,6 +140,28 @@ async function exportResultTree(): Promise<void> {
   }
 }
 
+interface CallSiteEntry { fnLabel: string; kind: HandlingKind; via?: string }
+interface CallSite { filePath: string; line: number; lineText: string; entries: CallSiteEntry[] }
+
+function buildCallSiteIndex(tree: GlobalResultTree): Map<string, CallSite> {
+  const map = new Map<string, CallSite>();
+  for (const group of tree.groups) {
+    for (const fn of group.functions) {
+      const fnLabel = group.kind === 'struct' ? `${group.label}::${fn.fnName}` : fn.fnName;
+      for (const h of fn.handling) {
+        const relPath = vscode.workspace.asRelativePath(h.uri);
+        const line = h.range.start.line + 1;
+        const key = `${relPath}:${line}`;
+        if (!map.has(key)) {
+          map.set(key, { filePath: relPath, line, lineText: h.lineText, entries: [] });
+        }
+        map.get(key)!.entries.push({ fnLabel, kind: h.kind, via: h.via });
+      }
+    }
+  }
+  return map;
+}
+
 function kindLabelPlain(kind: HandlingKind): string {
   switch (kind) {
     case 'unwrap':          return '.unwrap()';
@@ -156,6 +178,20 @@ function kindLabelPlain(kind: HandlingKind): string {
 }
 
 function formatJson(tree: GlobalResultTree): string {
+  const callSiteIndex = buildCallSiteIndex(tree);
+  const callSites = [...callSiteIndex.values()]
+    .sort((a, b) => a.filePath.localeCompare(b.filePath) || a.line - b.line)
+    .map(site => ({
+      filePath: site.filePath,
+      line: site.line,
+      lineText: site.lineText,
+      handlers: site.entries.map(e => ({
+        kind: e.kind,
+        via: e.via ?? null,
+        function: e.fnLabel
+      }))
+    }));
+
   return JSON.stringify({
     generatedAt: tree.generatedAt,
     groups: tree.groups.map(g => ({
@@ -175,7 +211,8 @@ function formatJson(tree: GlobalResultTree): string {
           lineText: h.lineText
         }))
       }))
-    }))
+    })),
+    callSites
   }, null, 2);
 }
 
@@ -237,6 +274,21 @@ function formatMermaid(tree: GlobalResultTree): string {
     }
   }
 
+  // Build subgraph map for groups with ≥2 functions
+  const subgraphMap = new Map<string, { sgId: string; label: string; fnNames: string[] }>();
+  const subgraphedFns = new Set<string>();
+  for (const group of tree.groups) {
+    if (group.functions.length >= 2) {
+      const sgId = 'sg_' + (group.kind === 'struct' ? group.label : group.filePath)
+        .replace(/[^a-zA-Z0-9]/g, '_');
+      const sgLabel = group.kind === 'struct'
+        ? `${group.label} — ${group.filePath}`
+        : group.filePath;
+      subgraphMap.set(sgId, { sgId, label: sgLabel, fnNames: group.functions.map(f => f.fnName) });
+      for (const f of group.functions) { subgraphedFns.add(f.fnName); }
+    }
+  }
+
   const lines: string[] = [
     '%%{init: {"theme":"neutral"}}%%',
     'graph TD',
@@ -251,8 +303,19 @@ function formatMermaid(tree: GlobalResultTree): string {
     '  %% Source functions (return Result/Option)',
   ];
 
+  // Emit subgraphs for grouped structs/files
+  for (const { sgId, label, fnNames } of subgraphMap.values()) {
+    lines.push(`  subgraph ${sgId} ["${label}"]`);
+    for (const fn of fnNames) {
+      lines.push(`    ${safeId(fn)}["${fn}"]:::source`);
+    }
+    lines.push('  end');
+  }
+  // Emit ungrouped source functions (single-fn groups)
   for (const fn of sourceFns) {
-    lines.push(`  ${safeId(fn)}["${fn}"]:::source`);
+    if (!subgraphedFns.has(fn)) {
+      lines.push(`  ${safeId(fn)}["${fn}"]:::source`);
+    }
   }
 
   if (passthroughFns.size > 0) {
@@ -305,6 +368,7 @@ function formatMarkdown(tree: GlobalResultTree): string {
     ''
   ];
 
+  // Section 1: per-function tree grouped by struct/file origin
   for (const group of tree.groups) {
     lines.push(group.kind === 'struct'
       ? `## \`${group.label}\` — ${group.filePath}`
@@ -326,6 +390,35 @@ function formatMarkdown(tree: GlobalResultTree): string {
     }
   }
 
+  // Section 2: inverted view — grouped by handling call site
+  const callSites = buildCallSiteIndex(tree);
+  if (callSites.size > 0) {
+    lines.push('---', '', '## Handling by Call Site', '');
+
+    // Group call sites by file
+    const byFile = new Map<string, CallSite[]>();
+    for (const site of callSites.values()) {
+      const list = byFile.get(site.filePath) ?? [];
+      list.push(site);
+      byFile.set(site.filePath, list);
+    }
+
+    const sortedFiles = [...byFile.keys()].sort();
+    for (const filePath of sortedFiles) {
+      const sites = byFile.get(filePath)!.sort((a, b) => a.line - b.line);
+      lines.push(`### \`${filePath}\``, '');
+      lines.push('| Line | Handler | Function |');
+      lines.push('|------|---------|----------|');
+      for (const site of sites) {
+        for (const entry of site.entries) {
+          const via = entry.via ? ` ↳ via \`${entry.via}\`` : '';
+          lines.push(`| ${site.line} | \`${kindLabelPlain(entry.kind)}\`${via} | \`${entry.fnLabel}\` |`);
+        }
+      }
+      lines.push('');
+    }
+  }
+
   return lines.join('\n');
 }
 
@@ -338,21 +431,40 @@ async function showResultPicker(
   const originalPosition = editor.selection.active;
   const originalVisible = editor.visibleRanges[0];
 
-  type PickItem = vscode.QuickPickItem & { location: HandlingLocation };
+  type PickItem = vscode.QuickPickItem & { location?: HandlingLocation };
 
-  const items: PickItem[] = locations.map(loc => {
-    const relativePath = vscode.workspace.asRelativePath(loc.uri);
-    const lineNum = loc.range.start.line + 1;
-    const indent = '  '.repeat(loc.depth);
-    const viaPrefix = loc.via ? `↳ via ${loc.via}  ` : '';
-    return {
-      label: `${indent}${kindLabel(loc.kind)}`,
-      description: `${viaPrefix}${path.basename(relativePath)}:${lineNum}`,
-      detail: `${indent}${loc.lineText}`,
+  const sorted = [...locations].sort((a, b) =>
+    a.depth !== b.depth
+      ? a.depth - b.depth
+      : vscode.workspace.asRelativePath(a.uri).localeCompare(vscode.workspace.asRelativePath(b.uri))
+  );
+
+  const items: PickItem[] = [];
+  let lastDepth = -1;
+  let lastFile = '';
+
+  for (const loc of sorted) {
+    const relPath = vscode.workspace.asRelativePath(loc.uri);
+    if (loc.depth !== lastDepth) {
+      const depthLabel = loc.depth === 0
+        ? 'Direct usages'
+        : `Propagated — depth ${loc.depth}${loc.via ? ` via ${loc.via}` : ''}`;
+      items.push({ label: depthLabel, kind: vscode.QuickPickItemKind.Separator });
+      lastFile = '';
+      lastDepth = loc.depth;
+    }
+    if (relPath !== lastFile) {
+      items.push({ label: relPath, kind: vscode.QuickPickItemKind.Separator });
+      lastFile = relPath;
+    }
+    items.push({
+      label: kindLabel(loc.kind),
+      description: `line ${loc.range.start.line + 1}`,
+      detail: loc.lineText,
       location: loc,
       alwaysShow: true
-    };
-  });
+    });
+  }
 
   const maxDepth = locations.reduce((m, l) => Math.max(m, l.depth), 0);
   const levelLabel = maxDepth > 0 ? ` across ${maxDepth + 1} level(s)` : '';
@@ -364,25 +476,24 @@ async function showResultPicker(
 
   // Live preview as user moves through items
   pick.onDidChangeActive(async active => {
-    if (active.length === 0) { return; }
-    const loc = active[0].location;
-    const doc = await vscode.workspace.openTextDocument(loc.uri);
+    const item = active[0];
+    if (!item?.location) { return; }
+    const doc = await vscode.workspace.openTextDocument(item.location.uri);
     await vscode.window.showTextDocument(doc, {
       preview: true,
       preserveFocus: true,
-      selection: loc.range
+      selection: item.location.range
     });
   });
 
   pick.onDidAccept(async () => {
     const selected = pick.selectedItems[0];
     pick.hide();
-    if (!selected) { return; }
-    const loc = selected.location;
-    const doc = await vscode.workspace.openTextDocument(loc.uri);
+    if (!selected?.location) { return; }
+    const doc = await vscode.workspace.openTextDocument(selected.location.uri);
     await vscode.window.showTextDocument(doc, {
       preview: false,
-      selection: loc.range
+      selection: selected.location.range
     });
   });
 
