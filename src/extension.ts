@@ -140,10 +140,10 @@ async function exportResultTree(): Promise<void> {
   }
 }
 
-interface CallSiteEntry { fnLabel: string; kind: HandlingKind; via?: string }
-interface CallSite { filePath: string; line: number; lineText: string; entries: CallSiteEntry[] }
+export interface CallSiteEntry { fnLabel: string; kind: HandlingKind; via?: string }
+export interface CallSite { filePath: string; line: number; lineText: string; entries: CallSiteEntry[] }
 
-function buildCallSiteIndex(tree: GlobalResultTree): Map<string, CallSite> {
+export function buildCallSiteIndex(tree: GlobalResultTree): Map<string, CallSite> {
   const map = new Map<string, CallSite>();
   for (const group of tree.groups) {
     for (const fn of group.functions) {
@@ -162,7 +162,7 @@ function buildCallSiteIndex(tree: GlobalResultTree): Map<string, CallSite> {
   return map;
 }
 
-function kindLabelPlain(kind: HandlingKind): string {
+export function kindLabelPlain(kind: HandlingKind): string {
   switch (kind) {
     case 'unwrap':          return '.unwrap()';
     case 'expect':          return '.expect(...)';
@@ -177,7 +177,7 @@ function kindLabelPlain(kind: HandlingKind): string {
   }
 }
 
-function formatJson(tree: GlobalResultTree): string {
+export function formatJson(tree: GlobalResultTree): string {
   const callSiteIndex = buildCallSiteIndex(tree);
   const callSites = [...callSiteIndex.values()]
     .sort((a, b) => a.filePath.localeCompare(b.filePath) || a.line - b.line)
@@ -216,7 +216,7 @@ function formatJson(tree: GlobalResultTree): string {
   }, null, 2);
 }
 
-function formatMermaid(tree: GlobalResultTree): string {
+export function formatMermaid(tree: GlobalResultTree): string {
   const safeId = (name: string) =>
     'fn_' + name.replace(/[^a-zA-Z0-9]/g, '_');
 
@@ -360,7 +360,7 @@ function formatMermaid(tree: GlobalResultTree): string {
   return lines.join('\n');
 }
 
-function formatMarkdown(tree: GlobalResultTree): string {
+export function formatMarkdown(tree: GlobalResultTree): string {
   const lines: string[] = [
     '# ErrorVis Result Handling Tree',
     '',
