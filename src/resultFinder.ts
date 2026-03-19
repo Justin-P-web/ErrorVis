@@ -29,7 +29,8 @@ const METHOD_CHAIN_PATTERN = new RegExp(
   `\\b(SYMBOL)${CALL_SUFFIX}\\s*\\.\\s*(unwrap|expect|unwrap_or(?:_else|_default)?|map|and_then|or(?:_else)?|is_ok|is_err|ok|err|map_err|flatten|transpose)\\s*[(\\s;,)]`
 );
 const QUESTION_MARK_PATTERN = new RegExp(`\\b(SYMBOL)${CALL_SUFFIX}\\s*\\?`);
-const RETURN_PATTERN = new RegExp(`\\breturn\\s+\\*{0,2}\\s*(SYMBOL)${CALL_SUFFIX}\\s*;`);
+const RETURN_PATTERN = new RegExp(`\\breturn\\s+\\*{0,2}\\s*(SYMBOL)${CALL_SUFFIX}\\s*;?`);
+const DIRECT_RETURN_PATTERN = new RegExp(`^\\s*\\*{0,2}\\s*(SYMBOL)${CALL_SUFFIX}\\s*$`);
 const MATCH_PATTERN = /\bmatch\s+\*{0,2}\s*(SYMBOL)\b/;
 const IF_LET_PATTERN = /\bif\s+let\s+(?:Ok|Err|Some|None)\s*(?:\([^)]*\))?\s*=\s*\*{0,2}\s*(SYMBOL)\b/;
 const WHILE_LET_PATTERN = /\bwhile\s+let\s+(?:Ok|Err|Some|None)\s*(?:\([^)]*\))?\s*=\s*\*{0,2}\s*(SYMBOL)\b/;
@@ -46,6 +47,9 @@ function classifyLine(lineText: string, symbol: string): HandlingKind | null {
     return 'question_mark';
   }
   if (buildPattern(RETURN_PATTERN, symbol).test(lineText)) {
+    return 'return';
+  }
+  if (buildPattern(DIRECT_RETURN_PATTERN, symbol).test(lineText)) {
     return 'return';
   }
   if (buildPattern(MATCH_PATTERN, symbol).test(lineText)) {
