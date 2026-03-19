@@ -80,13 +80,20 @@ function classifyLine(lineText: string, symbol: string): HandlingKind | null {
  *
  * In both cases we filter the candidate lines through `classifyLine`.
  */
+export type FindHandlingResult = {
+  locations: Array<{ uri: vscode.Uri; range: vscode.Range; lineText: string; kind: HandlingKind }>;
+  /** True when the LSP responded (rust-analyzer is active), false when unavailable or errored. */
+  lspAvailable: boolean;
+};
+
 export async function findHandlingLocations(
   document: vscode.TextDocument,
   symbolName: string,
   position: vscode.Position,
   onProgress?: (step: string) => void
-): Promise<Array<{ uri: vscode.Uri; range: vscode.Range; lineText: string; kind: HandlingKind }>> {
+): Promise<FindHandlingResult> {
   const results: Array<{ uri: vscode.Uri; range: vscode.Range; lineText: string; kind: HandlingKind }> = [];
+  let lspAvailable = false;
 
   // --- Tier 1: LSP references ---
   onProgress?.(`$(loading~spin) Querying LSP for "${symbolName}"…`);
@@ -97,8 +104,11 @@ export async function findHandlingLocations(
       document.uri,
       position
     );
-    if (raw && raw.length > 0) {
-      locations = raw;
+    if (raw !== null && raw !== undefined) {
+      lspAvailable = true; // rust-analyzer responded (even if it returned 0 references)
+      if (raw.length > 0) {
+        locations = raw;
+      }
     }
   } catch {
     // LSP not available — fall through to tier 2
@@ -118,7 +128,7 @@ export async function findHandlingLocations(
       }
     }
     if (results.length > 0) {
-      return results;
+      return { locations: results, lspAvailable };
     }
   }
 
@@ -139,7 +149,7 @@ export async function findHandlingLocations(
     }
   }
 
-  return results;
+  return { locations: results, lspAvailable };
 }
 
 /**
@@ -288,7 +298,7 @@ export async function findHandlingTree(
   }
   visited.add(symbolName);
 
-  const raw = await findHandlingLocations(document, symbolName, position, onProgress);
+  const { locations: raw } = await findHandlingLocations(document, symbolName, position, onProgress);
   const results: HandlingLocation[] = raw.map(r => ({ ...r, depth, via: depth > 0 ? symbolName : undefined }));
 
   // For each propagating usage, continue up the tree

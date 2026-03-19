@@ -1,6 +1,13 @@
 import * as vscode from 'vscode';
 import { findHandlingLocations } from './resultFinder';
 
+// setTimeout is available in the VS Code extension host (Node.js) but not declared
+// in lib: ["ES2020"] without @types/node; this declaration avoids a compile error.
+declare function setTimeout(callback: () => void, ms: number): unknown;
+
+const MAX_RETRY_COUNT = 6;   // give up after ~30 s (6 × 5 s)
+const RETRY_DELAY_MS  = 5000;
+
 // Matches `fn name(` and captures the function name; line must also contain `-> Result<` or `-> Option<`
 const FN_SIGNATURE = /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*[<(]/;
 const RETURNS_RESULT = /->.*?(?:Result|Option)\s*</;
@@ -21,12 +28,14 @@ export class ResultCodeLensProvider implements vscode.CodeLensProvider {
   private _resolving     = new Set<string>();                 // keys currently being resolved
   private _resolvedCmds  = new Map<string, vscode.Command>(); // key → final command (cache)
   private _pendingData   = new Map<number, LensData>();       // line → data for resolveCodeLens
+  private _retryCount    = new Map<string, number>();         // key → retries used so far
 
   refresh(): void {
     this._resolvedCmds.clear();
     this._stepMessages.clear();
     this._resolving.clear();
     this._pendingData.clear();
+    this._retryCount.clear();
     this._onDidChangeCodeLenses.fire();
   }
 
@@ -96,8 +105,35 @@ export class ResultCodeLensProvider implements vscode.CodeLensProvider {
       this._onDidChangeCodeLenses.fire();
     };
 
-    const locations = await findHandlingLocations(document, fnName, position, onProgress);
+    const { locations, lspAvailable } = await findHandlingLocations(document, fnName, position, onProgress);
     const count = locations.length;
+
+    const retries = this._retryCount.get(key) ?? 0;
+    if (!lspAvailable && count === 0 && retries < MAX_RETRY_COUNT) {
+      // rust-analyzer hasn't loaded yet — show a transient placeholder and schedule a retry
+      const waitingCommand: vscode.Command = {
+        title: '$(sync~spin) Waiting for rust-analyzer…',
+        command: ''
+      };
+      this._resolvedCmds.set(key, waitingCommand);
+      this._resolving.delete(key);
+      this._stepMessages.delete(key);
+      this._pendingData.delete(line);
+      this._retryCount.set(key, retries + 1);
+      this._onDidChangeCodeLenses.fire();
+
+      setTimeout(() => {
+        // Remove the placeholder so provideCodeLenses creates a fresh unresolved lens
+        this._resolvedCmds.delete(key);
+        this._onDidChangeCodeLenses.fire();
+      }, RETRY_DELAY_MS);
+
+      lens.command = waitingCommand;
+      return lens;
+    }
+
+    // LSP responded (or we've exhausted retries) — cache the final result
+    this._retryCount.delete(key);
 
     const command: vscode.Command = {
       title: count === 0
