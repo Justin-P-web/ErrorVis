@@ -384,8 +384,8 @@ describe('formatMarkdown()', () => {
 
   it('includes Markdown table headers in the call-site section', () => {
     const md = formatMarkdown(makeSimpleTree());
-    assert.ok(md.includes('| Line | Handler | Function |'));
-    assert.ok(md.includes('|------|---------|----------|'));
+    assert.ok(md.includes('| Line | Handler | Origin Function |'));
+    assert.ok(md.includes('|------|---------|-----------------|'));
   });
 
   it('includes table rows with correct data', () => {

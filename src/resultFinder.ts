@@ -5,8 +5,10 @@ export interface HandlingLocation {
   range: vscode.Range;
   lineText: string;
   kind: HandlingKind;
-  depth: number;   // 0 = direct caller, 1 = caller's caller, etc.
-  via?: string;    // function name through which propagation occurred
+  depth: number;        // 0 = direct caller, 1 = caller's caller, etc.
+  via?: string;         // function name through which propagation occurred
+  inFunction?: string;  // name of function containing this handling location
+  inStruct?: string;    // struct/impl name if the handler function is a method
 }
 
 export type HandlingKind =
@@ -201,6 +203,7 @@ export async function findHandlingLocations(
 
 /**
  * Finds the name and definition position of the innermost function containing `position`.
+ * Also returns the enclosing struct/impl name when the function is a method.
  *
  * Strategy:
  *  1. Ask the LSP for document symbols.
@@ -209,7 +212,13 @@ export async function findHandlingLocations(
 async function getEnclosingFunctionName(
   document: vscode.TextDocument,
   position: vscode.Position
-): Promise<{ name: string; uri: vscode.Uri; position: vscode.Position } | undefined> {
+): Promise<{ name: string; uri: vscode.Uri; position: vscode.Position; structName?: string } | undefined> {
+  // Pre-build document lines for struct detection (shared by both tiers)
+  const docLines: string[] = [];
+  for (let i = 0; i < document.lineCount; i++) {
+    docLines.push(document.lineAt(i).text);
+  }
+
   // --- Tier 1: LSP document symbols ---
   try {
     const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
@@ -219,10 +228,12 @@ async function getEnclosingFunctionName(
     if (symbols && symbols.length > 0) {
       const found = findInnermostFunction(symbols, position);
       if (found) {
+        const fnLine = found.selectionRange.start.line;
         return {
           name: found.name,
           uri: document.uri,
-          position: found.selectionRange.start
+          position: found.selectionRange.start,
+          structName: getEnclosingImplName(docLines, fnLine) ?? undefined
         };
       }
     }
@@ -240,12 +251,46 @@ async function getEnclosingFunctionName(
       return {
         name: match[1],
         uri: document.uri,
-        position: new vscode.Position(i, col >= 0 ? col : 0)
+        position: new vscode.Position(i, col >= 0 ? col : 0),
+        structName: getEnclosingImplName(docLines, i) ?? undefined
       };
     }
   }
 
   return undefined;
+}
+
+/**
+ * Scans document lines up to and including `fnLine` to find the innermost
+ * enclosing `impl StructName` block, using forward brace-depth tracking.
+ */
+function getEnclosingImplName(lines: string[], fnLine: number): string | null {
+  let braceDepth = 0;
+  let currentImpl: string | null = null;
+  let implBraceDepth = 0;
+
+  for (let i = 0; i <= fnLine; i++) {
+    const text = lines[i];
+
+    if (currentImpl === null && IMPL_LINE.test(text) && text.includes('{')) {
+      const name = extractImplStructName(text);
+      if (name) {
+        currentImpl = name;
+        implBraceDepth = braceDepth;
+      }
+    }
+
+    for (const ch of text) {
+      if (ch === '{') { braceDepth++; }
+      else if (ch === '}') { braceDepth--; }
+    }
+
+    if (currentImpl !== null && braceDepth <= implBraceDepth) {
+      currentImpl = null;
+    }
+  }
+
+  return currentImpl;
 }
 
 function findInnermostFunction(
@@ -347,6 +392,19 @@ export async function findHandlingTree(
 
   const { locations: raw } = await findHandlingLocations(document, symbolName, position, onProgress);
   const results: HandlingLocation[] = raw.map(r => ({ ...r, depth, via: depth > 0 ? symbolName : undefined }));
+
+  // Populate inFunction/inStruct for all handling locations at this recursion level
+  for (const result of results) {
+    const usageDoc = result.uri.toString() === document.uri.toString()
+      ? document
+      : await tryOpenDocument(result.uri);
+    if (!usageDoc) { continue; }
+    const enclosing = await getEnclosingFunctionName(usageDoc, result.range.start);
+    if (enclosing) {
+      result.inFunction = enclosing.name;
+      result.inStruct = enclosing.structName;
+    }
+  }
 
   // For each propagating usage, continue up the tree
   for (const loc of raw) {
