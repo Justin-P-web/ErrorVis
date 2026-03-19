@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { findHandlingTree, kindLabel, HandlingLocation } from './resultFinder';
+import { findHandlingTree, kindLabel, HandlingLocation, buildGlobalResultTree, GlobalResultTree, HandlingKind } from './resultFinder';
 import { ResultCodeLensProvider } from './codeLensProvider';
 
 let codeLensProvider: ResultCodeLensProvider | undefined;
@@ -21,6 +21,10 @@ export function activate(context: vscode.ExtensionContext): void {
       (uri?: vscode.Uri, position?: vscode.Position) =>
         findResultUsages(uri, position)
     )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('errorvis.exportResultTree', exportResultTree)
   );
 
   // Refresh lenses when config changes
@@ -83,6 +87,122 @@ async function findResultUsages(
       await showResultPicker(symbolName, locations, editor);
     }
   );
+}
+
+async function exportResultTree(): Promise<void> {
+  const defaultFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+  const saveUri = await vscode.window.showSaveDialog({
+    defaultUri: vscode.Uri.file(path.join(defaultFolder, 'result-tree.json')),
+    filters: { 'JSON files': ['json'] },
+    saveLabel: 'Export'
+  });
+  if (!saveUri) { return; }
+
+  const jsonPath = saveUri.fsPath;
+  const mdPath = jsonPath.replace(/\.json$/i, '') + '.md';
+  const mdUri = vscode.Uri.file(mdPath);
+
+  let tree: GlobalResultTree | undefined;
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'ErrorVis: Building result tree…', cancellable: false },
+    async progress => {
+      tree = await buildGlobalResultTree((message, increment) => {
+        progress.report({ message, increment });
+      });
+    }
+  );
+
+  if (!tree || tree.groups.length === 0) {
+    vscode.window.showInformationMessage('ErrorVis: No result-handling usages found in workspace.');
+    return;
+  }
+
+  const encoder = new TextEncoder();
+  await vscode.workspace.fs.writeFile(saveUri, encoder.encode(formatJson(tree)));
+  await vscode.workspace.fs.writeFile(mdUri, encoder.encode(formatMarkdown(tree)));
+
+  const totalFns = tree.groups.reduce((n, g) => n + g.functions.length, 0);
+  const action = await vscode.window.showInformationMessage(
+    `ErrorVis: Result tree exported — ${totalFns} function(s) across ${tree.groups.length} group(s).`,
+    'Open Markdown',
+    'Open JSON'
+  );
+  if (action === 'Open Markdown') {
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(mdUri));
+  } else if (action === 'Open JSON') {
+    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(saveUri));
+  }
+}
+
+function kindLabelPlain(kind: HandlingKind): string {
+  switch (kind) {
+    case 'unwrap':          return '.unwrap()';
+    case 'expect':          return '.expect(...)';
+    case 'unwrap_or':       return '.unwrap_or*(...)';
+    case 'map_combinator':  return 'combinator';
+    case 'question_mark':   return '?';
+    case 'return':          return 'return';
+    case 'match':           return 'match';
+    case 'if_let':          return 'if let';
+    case 'while_let':       return 'while let';
+    case 'check':           return '.is_ok()/.is_err()';
+  }
+}
+
+function formatJson(tree: GlobalResultTree): string {
+  return JSON.stringify({
+    generatedAt: tree.generatedAt,
+    groups: tree.groups.map(g => ({
+      kind: g.kind,
+      label: g.label,
+      filePath: g.filePath,
+      functions: g.functions.map(f => ({
+        fnName: f.fnName,
+        filePath: f.filePath,
+        line: f.line,
+        handling: f.handling.map(h => ({
+          kind: h.kind,
+          depth: h.depth,
+          via: h.via ?? null,
+          filePath: vscode.workspace.asRelativePath(h.uri),
+          line: h.range.start.line + 1,
+          lineText: h.lineText
+        }))
+      }))
+    }))
+  }, null, 2);
+}
+
+function formatMarkdown(tree: GlobalResultTree): string {
+  const lines: string[] = [
+    '# ErrorVis Result Handling Tree',
+    '',
+    `Generated: ${tree.generatedAt}`,
+    ''
+  ];
+
+  for (const group of tree.groups) {
+    lines.push(group.kind === 'struct'
+      ? `## \`${group.label}\` — ${group.filePath}`
+      : `## ${group.filePath}`
+    );
+    lines.push('');
+
+    for (const fn of group.functions) {
+      lines.push(`### \`${fn.fnName}\` (line ${fn.line})`);
+      lines.push('');
+      for (const h of fn.handling) {
+        const indent = '  '.repeat(h.depth);
+        const loc = `${vscode.workspace.asRelativePath(h.uri)}:${h.range.start.line + 1}`;
+        const via = h.via ? ` ↳ via \`${h.via}\`` : '';
+        lines.push(`${indent}- **${kindLabelPlain(h.kind)}**${via} — \`${loc}\``);
+        lines.push(`${indent}  \`${h.lineText}\``);
+      }
+      lines.push('');
+    }
+  }
+
+  return lines.join('\n');
 }
 
 async function showResultPicker(
