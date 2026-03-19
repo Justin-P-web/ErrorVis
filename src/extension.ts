@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { findHandlingTree, kindLabel, HandlingLocation, buildGlobalResultTree, GlobalResultTree, HandlingKind } from './resultFinder';
+import { findHandlingTree, kindLabel, HandlingLocation, buildGlobalResultTree, GlobalResultTree, ResultGroup, HandlingKind } from './resultFinder';
 import { ResultCodeLensProvider } from './codeLensProvider';
 
 let codeLensProvider: ResultCodeLensProvider | undefined;
@@ -100,9 +100,7 @@ async function exportResultTree(): Promise<void> {
 
   const jsonPath = saveUri.fsPath;
   const mdPath = jsonPath.replace(/\.json$/i, '') + '.md';
-  const mmdPath = jsonPath.replace(/\.json$/i, '') + '.mmd';
   const mdUri = vscode.Uri.file(mdPath);
-  const mmdUri = vscode.Uri.file(mmdPath);
 
   let tree: GlobalResultTree | undefined;
   await vscode.window.withProgress(
@@ -122,17 +120,34 @@ async function exportResultTree(): Promise<void> {
   const encoder = new TextEncoder();
   await vscode.workspace.fs.writeFile(saveUri, encoder.encode(formatJson(tree)));
   await vscode.workspace.fs.writeFile(mdUri, encoder.encode(formatMarkdown(tree)));
-  await vscode.workspace.fs.writeFile(mmdUri, encoder.encode(formatMermaid(tree)));
+
+  const basePath = jsonPath.replace(/\.json$/i, '');
+  const mmdDiagrams = formatMermaid(tree);
+  const mmdUris: vscode.Uri[] = [];
+  for (const { filePath, content } of mmdDiagrams) {
+    const safeName = filePath.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    const mmdFileUri = vscode.Uri.file(`${basePath}-${safeName}.mmd`);
+    await vscode.workspace.fs.writeFile(mmdFileUri, encoder.encode(content));
+    mmdUris.push(mmdFileUri);
+  }
 
   const totalFns = tree.groups.reduce((n, g) => n + g.functions.length, 0);
   const action = await vscode.window.showInformationMessage(
-    `ErrorVis: Result tree exported — ${totalFns} function(s) across ${tree.groups.length} group(s).`,
+    `ErrorVis: Result tree exported — ${totalFns} function(s) across ${tree.groups.length} group(s). ${mmdUris.length} Mermaid diagram(s) written.`,
     'Open Mermaid',
     'Open Markdown',
     'Open JSON'
   );
   if (action === 'Open Mermaid') {
-    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(mmdUri));
+    if (mmdUris.length === 1) {
+      await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(mmdUris[0]));
+    } else if (mmdUris.length > 1) {
+      const items = mmdDiagrams.map((d, i) => ({ label: d.filePath, uri: mmdUris[i] }));
+      const picked = await vscode.window.showQuickPick(items, { placeHolder: 'Select a file diagram to open' });
+      if (picked) {
+        await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(picked.uri));
+      }
+    }
   } else if (action === 'Open Markdown') {
     await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(mdUri));
   } else if (action === 'Open JSON') {
@@ -216,13 +231,29 @@ export function formatJson(tree: GlobalResultTree): string {
   }, null, 2);
 }
 
-export function formatMermaid(tree: GlobalResultTree): string {
+export interface MermaidDiagram { filePath: string; content: string }
+
+export function formatMermaid(tree: GlobalResultTree): MermaidDiagram[] {
+  // Bucket groups by their source file
+  const byFile = new Map<string, ResultGroup[]>();
+  for (const group of tree.groups) {
+    const arr = byFile.get(group.filePath);
+    if (arr) { arr.push(group); }
+    else { byFile.set(group.filePath, [group]); }
+  }
+
+  return [...byFile.entries()].map(([filePath, groups]) =>
+    ({ filePath, content: formatMermaidForFile(filePath, groups) })
+  );
+}
+
+function formatMermaidForFile(filePath: string, groups: ResultGroup[]): string {
   const safeId = (name: string) =>
     'fn_' + name.replace(/[^a-zA-Z0-9]/g, '_');
 
-  // Collect all source function names (Result/Option-returning fns in the tree)
+  // Collect all source function names in this file
   const sourceFns = new Set<string>();
-  for (const group of tree.groups) {
+  for (const group of groups) {
     for (const fn of group.functions) {
       sourceFns.add(fn.fnName);
     }
@@ -230,7 +261,7 @@ export function formatMermaid(tree: GlobalResultTree): string {
 
   // Collect pass-through functions: appear in loc.via but are not themselves sources
   const passthroughFns = new Set<string>();
-  for (const group of tree.groups) {
+  for (const group of groups) {
     for (const fn of group.functions) {
       for (const loc of fn.handling) {
         if (loc.via && !sourceFns.has(loc.via)) {
@@ -252,21 +283,17 @@ export function formatMermaid(tree: GlobalResultTree): string {
     }
   };
 
-  // Collect which terminal handler kinds are actually used
   const usedKinds = new Set<HandlingKind>();
 
-  for (const group of tree.groups) {
+  for (const group of groups) {
     for (const fn of group.functions) {
       const srcId = safeId(fn.fnName);
       for (const loc of fn.handling) {
         if (loc.via) {
-          // source → pass-through (propagation edge)
           const viaId = safeId(loc.via);
           addEdge(srcId, viaId, '?');
-          // pass-through → terminal handler
           addEdge(viaId, `h_${loc.kind}`, kindLabelPlain(loc.kind));
         } else {
-          // source → terminal handler (direct)
           addEdge(srcId, `h_${loc.kind}`, kindLabelPlain(loc.kind));
         }
         usedKinds.add(loc.kind);
@@ -274,23 +301,9 @@ export function formatMermaid(tree: GlobalResultTree): string {
     }
   }
 
-  // Build subgraph map for groups with ≥2 functions
-  const subgraphMap = new Map<string, { sgId: string; label: string; fnNames: string[] }>();
-  const subgraphedFns = new Set<string>();
-  for (const group of tree.groups) {
-    if (group.functions.length >= 2) {
-      const sgId = 'sg_' + (group.kind === 'struct' ? group.label : group.filePath)
-        .replace(/[^a-zA-Z0-9]/g, '_');
-      const sgLabel = group.kind === 'struct'
-        ? `${group.label} — ${group.filePath}`
-        : group.filePath;
-      subgraphMap.set(sgId, { sgId, label: sgLabel, fnNames: group.functions.map(f => f.fnName) });
-      for (const f of group.functions) { subgraphedFns.add(f.fnName); }
-    }
-  }
-
   const lines: string[] = [
     '%%{init: {"theme":"neutral"}}%%',
+    `%% ${filePath}`,
     'graph TD',
     '  classDef source fill:#4A90D9,stroke:#2C5F8A,color:#fff',
     '  classDef passthrough fill:#F5A623,stroke:#C67D0E,color:#333,stroke-dasharray:5 5',
@@ -303,20 +316,38 @@ export function formatMermaid(tree: GlobalResultTree): string {
     '  %% Source functions (return Result/Option)',
   ];
 
-  // Emit subgraphs for grouped structs/files
-  for (const { sgId, label, fnNames } of subgraphMap.values()) {
-    lines.push(`  subgraph ${sgId} ["${label}"]`);
-    for (const fn of fnNames) {
-      lines.push(`    ${safeId(fn)}["${fn}"]:::source`);
+  // File-level subgraph containing all source nodes for this file
+  const fileSgId = 'sg_file_' + filePath.replace(/[^a-zA-Z0-9]/g, '_');
+  lines.push(`  subgraph ${fileSgId} ["${filePath}"]`);
+
+  const emittedFns = new Set<string>();
+
+  // Emit struct subgraphs nested inside the file subgraph
+  for (const group of groups) {
+    if (group.kind === 'struct') {
+      const sgId = 'sg_' + group.label.replace(/[^a-zA-Z0-9]/g, '_');
+      lines.push(`    subgraph ${sgId} ["${group.label}"]`);
+      for (const fn of group.functions) {
+        lines.push(`      ${safeId(fn.fnName)}["${fn.fnName}"]:::source`);
+        emittedFns.add(fn.fnName);
+      }
+      lines.push('    end');
     }
-    lines.push('  end');
   }
-  // Emit ungrouped source functions (single-fn groups)
-  for (const fn of sourceFns) {
-    if (!subgraphedFns.has(fn)) {
-      lines.push(`  ${safeId(fn)}["${fn}"]:::source`);
+
+  // Emit ungrouped functions (file-kind groups) directly inside the file subgraph
+  for (const group of groups) {
+    if (group.kind === 'file') {
+      for (const fn of group.functions) {
+        if (!emittedFns.has(fn.fnName)) {
+          lines.push(`    ${safeId(fn.fnName)}["${fn.fnName}"]:::source`);
+          emittedFns.add(fn.fnName);
+        }
+      }
     }
   }
+
+  lines.push('  end');
 
   if (passthroughFns.size > 0) {
     lines.push('');
@@ -327,7 +358,6 @@ export function formatMermaid(tree: GlobalResultTree): string {
   }
 
   // Terminal handler node definitions
-  // Shape and class per kind
   const kindDef: Record<HandlingKind, { shape: [string, string]; cls: string }> = {
     unwrap:         { shape: ['{{', '}}'], cls: 'danger' },
     expect:         { shape: ['{{', '}}'], cls: 'danger' },
@@ -349,7 +379,6 @@ export function formatMermaid(tree: GlobalResultTree): string {
     lines.push(`  h_${kind}${open}"${label}"${close}:::${cls}`);
   }
 
-  // Edges
   lines.push('');
   lines.push('  %% Error flow edges');
   for (const { fromId, toId, label, count } of edgeMap.values()) {
