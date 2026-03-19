@@ -31,9 +31,9 @@ const METHOD_CHAIN_PATTERN = new RegExp(
 const QUESTION_MARK_PATTERN = new RegExp(`\\b(SYMBOL)${CALL_SUFFIX}\\s*\\?`);
 const RETURN_PATTERN = new RegExp(`\\breturn\\s+(?:\\w+(?:\\.\\w+)*\\.)?\\*{0,2}\\s*(SYMBOL)${CALL_SUFFIX}\\s*;?`);
 const DIRECT_RETURN_PATTERN = new RegExp(`^\\s*(?:\\w+(?:\\.\\w+)*\\.)?\\*{0,2}\\s*(SYMBOL)${CALL_SUFFIX}\\s*$`);
-const MATCH_PATTERN = /\bmatch\s+\*{0,2}\s*(SYMBOL)\b/;
-const IF_LET_PATTERN = /\bif\s+let\s+(?:Ok|Err|Some|None)\s*(?:\([^)]*\))?\s*=\s*\*{0,2}\s*(SYMBOL)\b/;
-const WHILE_LET_PATTERN = /\bwhile\s+let\s+(?:Ok|Err|Some|None)\s*(?:\([^)]*\))?\s*=\s*\*{0,2}\s*(SYMBOL)\b/;
+const MATCH_PATTERN = new RegExp(`\\bmatch\\s+(?:\\w+(?:\\.\\w+)*\\.)?\\*{0,2}\\s*(SYMBOL)\\b${CALL_SUFFIX}`);
+const IF_LET_PATTERN = new RegExp(`\\bif\\s+let\\s+(?:Ok|Err|Some|None)\\s*(?:\\([^)]*\\))?\\s*=\\s*(?:\\w+(?:\\.\\w+)*\\.)?\\*{0,2}\\s*(SYMBOL)\\b${CALL_SUFFIX}`);
+const WHILE_LET_PATTERN = new RegExp(`\\bwhile\\s+let\\s+(?:Ok|Err|Some|None)\\s*(?:\\([^)]*\\))?\\s*=\\s*(?:\\w+(?:\\.\\w+)*\\.)?\\*{0,2}\\s*(SYMBOL)\\b${CALL_SUFFIX}`);
 
 const MAX_DEPTH = 10;
 
