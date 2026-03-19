@@ -21,6 +21,25 @@ export type HandlingKind =
   | 'while_let'
   | 'check';
 
+export interface FunctionResultTree {
+  fnName: string;
+  filePath: string;  // workspace-relative path
+  line: number;      // 1-based line of fn definition
+  handling: HandlingLocation[];
+}
+
+export interface ResultGroup {
+  kind: 'struct' | 'file';
+  label: string;    // struct name OR relative file path
+  filePath: string; // always the relative file path (for context in struct groups)
+  functions: FunctionResultTree[];
+}
+
+export interface GlobalResultTree {
+  generatedAt: string; // ISO timestamp
+  groups: ResultGroup[];
+}
+
 // Optional function-call suffix, handling one level of argument nesting: foo(a, bar(b))
 const CALL_SUFFIX = '(?:\\([^()]*(?:\\([^()]*\\)[^()]*)*\\))?';
 
@@ -38,6 +57,11 @@ const IF_LET_PATTERN = new RegExp(`\\bif\\s+let\\s+(?:Ok|Err|Some|None)\\s*(?:\\
 const WHILE_LET_PATTERN = new RegExp(`\\bwhile\\s+let\\s+(?:Ok|Err|Some|None)\\s*(?:\\([^)]*\\))?\\s*=\\s*(?:${PATH_PREFIX})?\\*{0,2}\\s*(SYMBOL)\\b${CALL_SUFFIX}`);
 
 const MAX_DEPTH = 10;
+
+// Mirror of constants in codeLensProvider.ts — duplicated here to avoid a circular import.
+const FN_SIGNATURE  = /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*[<(]/;
+const RETURNS_RESULT = /->.*?(?:Result|Option)\s*</;
+const IMPL_LINE = /^\s*impl\b/;
 
 function buildPattern(template: RegExp, symbol: string): RegExp {
   const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -344,6 +368,158 @@ export async function findHandlingTree(
   }
 
   return results;
+}
+
+/** Strips nested angle-bracket generics from a line to simplify impl-struct extraction. */
+function stripGenerics(line: string): string {
+  let s = line;
+  for (let i = 0; i < 6; i++) {
+    const stripped = s.replace(/<[^<>]*>/g, '');
+    if (stripped === s) { break; }
+    s = stripped;
+  }
+  return s;
+}
+
+/** Extracts the concrete struct/type name from an `impl ...` line. */
+function extractImplStructName(line: string): string | null {
+  const simplified = stripGenerics(line);
+  // Prefer "for TypeName" (trait impl) over the first type after `impl`
+  const forMatch = /\bfor\s+(\w+)/.exec(simplified);
+  if (forMatch) { return forMatch[1]; }
+  const implMatch = /\bimpl\s+(\w+)/.exec(simplified);
+  return implMatch ? implMatch[1] : null;
+}
+
+interface ScannedFn {
+  fnName: string;
+  position: vscode.Position;
+  implName: string | null;
+}
+
+/** Scans a document and returns all Result/Option-returning functions with their impl context. */
+function scanDocumentForResultFns(document: vscode.TextDocument): ScannedFn[] {
+  const results: ScannedFn[] = [];
+  let braceDepth = 0;
+  let currentImpl: string | null = null;
+  let implBraceDepth = 0;
+
+  for (let i = 0; i < document.lineCount; i++) {
+    const text = document.lineAt(i).text;
+
+    // Detect impl block that opens on this line
+    if (currentImpl === null && IMPL_LINE.test(text) && text.includes('{')) {
+      const name = extractImplStructName(text);
+      if (name) {
+        currentImpl = name;
+        implBraceDepth = braceDepth; // depth BEFORE this line's braces
+      }
+    }
+
+    // Count braces on this line
+    for (const ch of text) {
+      if (ch === '{') { braceDepth++; }
+      else if (ch === '}') { braceDepth--; }
+    }
+
+    // Check if we've exited the impl block
+    if (currentImpl !== null && braceDepth <= implBraceDepth) {
+      currentImpl = null;
+    }
+
+    // Check for a Result/Option-returning fn
+    const fnMatch = FN_SIGNATURE.exec(text);
+    if (!fnMatch) { continue; }
+
+    // Collect multi-line signature (same logic as codeLensProvider)
+    let sigText = text;
+    let j = i + 1;
+    while (j < document.lineCount && !sigText.includes('{') && !sigText.includes(';') && j - i < 10) {
+      sigText += ' ' + document.lineAt(j).text;
+      j++;
+    }
+    if (!RETURNS_RESULT.test(sigText)) { continue; }
+
+    const fnName = fnMatch[1];
+    const col = text.indexOf(fnName);
+    results.push({
+      fnName,
+      position: new vscode.Position(i, col >= 0 ? col : 0),
+      implName: currentImpl
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Scans every Rust file in the workspace, builds a handling tree for each
+ * Result/Option-returning function, and returns results grouped by struct (for
+ * impl methods) or by file (for free functions).
+ */
+export async function buildGlobalResultTree(
+  onProgress?: (message: string, increment: number) => void
+): Promise<GlobalResultTree> {
+  const uris = await vscode.workspace.findFiles('**/*.rs', '**/target/**');
+
+  // Phase 1: collect all Result/Option-returning functions across the workspace
+  interface PendingFn extends ScannedFn {
+    uri: vscode.Uri;
+    filePath: string;
+  }
+  const pending: PendingFn[] = [];
+  for (const uri of uris) {
+    const doc = await tryOpenDocument(uri);
+    if (!doc) { continue; }
+    const filePath = vscode.workspace.asRelativePath(uri);
+    for (const fn of scanDocumentForResultFns(doc)) {
+      pending.push({ uri, filePath, ...fn });
+    }
+  }
+
+  if (pending.length === 0) {
+    return { generatedAt: new Date().toISOString(), groups: [] };
+  }
+
+  const increment = 100 / pending.length;
+
+  // Phase 2: build handling tree for each function, grouped by struct or file
+  const groupMap = new Map<string, ResultGroup>();
+
+  for (const fn of pending) {
+    onProgress?.(`$(loading~spin) Analysing "${fn.fnName}" in ${fn.filePath}…`, increment);
+
+    const doc = await tryOpenDocument(fn.uri);
+    if (!doc) { continue; }
+
+    const handling = await findHandlingTree(doc, fn.fnName, fn.position);
+    if (handling.length === 0) { continue; }
+
+    const groupKey = fn.implName
+      ? `struct:${fn.implName}:${fn.filePath}`
+      : `file:${fn.filePath}`;
+
+    if (!groupMap.has(groupKey)) {
+      groupMap.set(groupKey, {
+        kind: fn.implName ? 'struct' : 'file',
+        label: fn.implName ?? fn.filePath,
+        filePath: fn.filePath,
+        functions: []
+      });
+    }
+
+    groupMap.get(groupKey)!.functions.push({
+      fnName: fn.fnName,
+      filePath: fn.filePath,
+      line: fn.position.line + 1,
+      handling
+    });
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    groups: Array.from(groupMap.values())
+  };
 }
 
 async function tryOpenDocument(uri: vscode.Uri): Promise<vscode.TextDocument | undefined> {

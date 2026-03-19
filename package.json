@@ -27,6 +27,11 @@
         "command": "errorvis.findResultUsages",
         "title": "Find Result Usages",
         "category": "ErrorVis"
+      },
+      {
+        "command": "errorvis.exportResultTree",
+        "title": "Export Result Tree",
+        "category": "ErrorVis"
       }
     ],
     "menus": {
