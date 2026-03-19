@@ -60,6 +60,22 @@ describe('classifyLine()', () => {
     it('detects implicit return with call suffix', () => {
       assertKind('    get_value()', 'get_value', 'return');
     });
+
+    it('detects implicit return with single-dot receiver', () => {
+      assertKind('    self.get_value()', 'get_value', 'return');
+    });
+
+    it('detects implicit return with multi-dot receiver', () => {
+      assertKind('    self.subobject.get_value()', 'get_value', 'return');
+    });
+
+    it('detects implicit return with deeply nested receiver', () => {
+      assertKind('    self.a.b.c.get_value()', 'get_value', 'return');
+    });
+
+    it('detects explicit return with multi-dot receiver', () => {
+      assertKind('    return self.subobject.get_value();', 'get_value', 'return');
+    });
   });
 
   // ── match ──────────────────────────────────────────────────────────────────
@@ -78,6 +94,14 @@ describe('classifyLine()', () => {
 
     it('detects match with spacing around keyword', () => {
       assertKind('  match  my_result  {', 'my_result', 'match');
+    });
+
+    it('detects match with single-dot receiver call', () => {
+      assertKind('    match self.get_result() {', 'get_result', 'match');
+    });
+
+    it('detects match with multi-dot receiver call', () => {
+      assertKind('    match self.subobject.get_result() {', 'get_result', 'match');
     });
   });
 
@@ -102,6 +126,14 @@ describe('classifyLine()', () => {
     it('detects if let with dereference', () => {
       assertKind('    if let Ok(v) = *my_result {', 'my_result', 'if_let');
     });
+
+    it('detects if let with single-dot receiver call', () => {
+      assertKind('    if let Ok(v) = self.get_result() {', 'get_result', 'if_let');
+    });
+
+    it('detects if let with multi-dot receiver call', () => {
+      assertKind('    if let Ok(v) = self.subobject.get_result() {', 'get_result', 'if_let');
+    });
   });
 
   // ── while_let ──────────────────────────────────────────────────────────────
@@ -120,6 +152,10 @@ describe('classifyLine()', () => {
 
     it('detects while let with dereference', () => {
       assertKind('    while let Some(x) = *my_result {', 'my_result', 'while_let');
+    });
+
+    it('detects while let with multi-dot receiver call', () => {
+      assertKind('    while let Some(v) = self.subobject.next() {', 'next', 'while_let');
     });
   });
 
