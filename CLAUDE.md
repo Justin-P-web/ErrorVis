@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**ErrorVis** is a VSCode extension for Rust developers that provides visual navigation of `Result` and `Option` error handling. It adds CodeLens badges above functions returning `Result<T>` or `Option<T>`, and enables a "Find Result Usages" command that shows all locations where those values are unwrapped, propagated, or matched. A global "Export Result Tree" command lets users export a workspace-wide analysis to JSON or Markdown.
+**ErrorVis** is a VSCode extension for Rust developers that provides visual navigation of `Result` and `Option` error handling. It adds CodeLens badges above functions returning `Result<T>` or `Option<T>`, and enables a "Find Result Usages" command that shows all locations where those values are unwrapped, propagated, or matched. A global "Export Result Tree" command lets users export a workspace-wide analysis to JSON, Markdown, or Mermaid diagram.
 
 - **Publisher:** Justin-P-web
 - **Version:** 0.2.1
@@ -73,7 +73,7 @@ npm test   # Runs: mocha (configured via .mocharc.json)
 **Test structure:**
 - `src/test/classifyLine.test.ts` — 80+ test cases covering all 10 handling patterns
 - `src/test/setup.ts` — intercepts `require('vscode')` and routes to mock before any module loads
-- `src/test/mocks/vscode.ts` — minimal stub providing `Uri`, `Position`, `Range`, `SymbolKind`, `commands`, `workspace`
+- `src/test/mocks/vscode.ts` — minimal stub providing `Uri`, `Position`, `Range`, `SymbolKind`, `QuickPickItemKind`, `commands`, `workspace`
 
 **Running tests does NOT require VSCode to be open** — the mock allows isolated Node.js execution.
 
@@ -102,9 +102,9 @@ vsce publish                # Publish to VS Code Marketplace
 
 | File | Responsibility |
 |---|---|
-| `extension.ts` | VSCode lifecycle (`activate`/`deactivate`), command registration, configuration listeners, `showResultPicker()` quick-pick UI, `exportResultTree()` JSON/Markdown export |
+| `extension.ts` | VSCode lifecycle (`activate`/`deactivate`), command registration, configuration listeners, `showResultPicker()` quick-pick UI, `exportResultTree()` JSON/Markdown/Mermaid export, `buildCallSiteIndex()`, `kindLabelPlain()`, `formatJson()`, `formatMarkdown()`, `formatMermaid()` |
 | `codeLensProvider.ts` | `ResultCodeLensProvider` — scans open Rust documents for `fn` signatures returning `Result<T>`/`Option<T>`, provides/resolves CodeLens with usage counts, exponential backoff retry |
-| `resultFinder.ts` | `findHandlingLocations()`, `findHandlingTree()`, `buildGlobalResultTree()` — two-tier search (LSP references → regex fallback), `classifyLine()` pattern matcher, typed tree structures |
+| `resultFinder.ts` | `findHandlingLocations()`, `findHandlingTree()`, `buildGlobalResultTree()`, `scanDocumentForResultFns()` — two-tier search (LSP references → regex fallback), `classifyLine()` pattern matcher, typed tree structures, `kindLabel()` |
 
 ### Commands
 
@@ -144,29 +144,34 @@ vsce publish                # Publish to VS Code Marketplace
 
 ### Tree Structures (`resultFinder.ts`)
 
+These are the exported interfaces that represent the analysis results:
+
 ```typescript
-interface HandlingLocation {
+export interface HandlingLocation {
   uri: vscode.Uri;
   range: vscode.Range;
+  lineText: string;         // raw source line text
   kind: HandlingKind;
-  depth: number;
-  via?: string;         // propagation origin symbol
+  depth: number;            // 0 = direct caller, 1 = caller's caller, etc.
+  via?: string;             // function name through which propagation occurred
 }
 
-interface FunctionResultTree {
-  symbol: string;
-  uri: vscode.Uri;
-  locations: HandlingLocation[];
-  children: FunctionResultTree[];
+export interface FunctionResultTree {
+  fnName: string;
+  filePath: string;         // workspace-relative path
+  line: number;             // 1-based line of fn definition
+  handling: HandlingLocation[];
 }
 
-interface ResultGroup {
-  symbol: string;
-  uri: vscode.Uri;
-  tree: FunctionResultTree;
+export interface ResultGroup {
+  kind: 'struct' | 'file';
+  label: string;            // struct name OR relative file path
+  filePath: string;         // always the relative file path (for context in struct groups)
+  functions: FunctionResultTree[];
 }
 
-interface GlobalResultTree {
+export interface GlobalResultTree {
+  generatedAt: string;      // ISO timestamp
   groups: ResultGroup[];
 }
 ```
@@ -178,11 +183,34 @@ interface GlobalResultTree {
 - Cycle detection via `visited` set
 - Tracks propagation path with the `via` field
 
+### Export Formats (`extension.ts`)
+
+`exportResultTree()` produces three output files simultaneously and offers to open each:
+
+| Format | Function | Output |
+|---|---|---|
+| JSON | `formatJson()` | Structured `GlobalResultTree` with `generatedAt` timestamp |
+| Markdown | `formatMarkdown()` | Human-readable grouped by struct/file with icon table |
+| Mermaid | `formatMermaid()` | `.mmd` flowchart with colored nodes (source=blue, pass-through=orange dashed, handlers=red/green/yellow by risk) |
+
+`buildCallSiteIndex()` builds a `Map<string, CallSite>` from the global tree keyed by `"filePath:line"`, used internally by `formatMermaid()` to generate edges.
+
+### Global Tree Building (`resultFinder.ts`)
+
+`buildGlobalResultTree()` performs workspace-wide analysis:
+- Scans all `.rs` files via `vscode.workspace.findFiles`
+- Excludes `target/`, `tests/`, `examples/`, `benches/` directories
+- Groups functions by struct (impl context) or file
+- Returns a `GlobalResultTree` with an ISO `generatedAt` timestamp
+
+`scanDocumentForResultFns()` finds all `Result`/`Option`-returning functions within a document, tracking impl context (struct name) for accurate grouping.
+
 ### CodeLens Retry Logic (`codeLensProvider.ts`)
 
 Resolving CodeLens (computing usage counts) uses exponential backoff:
 - **36 retries** × 5 s interval ≈ 3 minutes maximum wait
 - Three rendering states: unresolved → loading (spinner) → resolved (count badge)
+- Step messages during resolution: "Querying LSP...", "Waiting for rust-analyzer...", etc.
 - Results are cached per lens; cache is invalidated on document change
 
 ---
@@ -228,7 +256,7 @@ symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 1. Add a new entry to the `HandlingKind` type union in `resultFinder.ts`
 2. Add the corresponding regex branch in `classifyLine()`
 3. Update `kindLabel()` in `resultFinder.ts` with the new icon/label
-4. Add the display icon/label in `extension.ts` (`kindLabelPlain()` or equivalent)
+4. Add the display icon/label in `extension.ts` (`kindLabelPlain()`)
 5. Add test cases in `src/test/classifyLine.test.ts`
 
 ### Adding a New Language
@@ -264,6 +292,8 @@ Read in `extension.ts` via `vscode.workspace.getConfiguration('errorvis').get('e
 - `tsx@^4.21.0` — TypeScript ESM/CJS loader for Mocha (via `tsx/cjs`)
 - `ts-node@^10.9.2` — TypeScript Node.js runtime
 
+**Security overrides** (`package.json` `overrides`): `diff` and `serialize-javascript` pinned to patch known vulnerabilities.
+
 **Recommended for users:** rust-analyzer (enables cross-file LSP references; without it, the regex fallback handles single-file search only).
 
 ---
@@ -278,11 +308,13 @@ Read in `extension.ts` via `vscode.workspace.getConfiguration('errorvis').get('e
 
 ## Common Tasks for AI Assistants
 
-- **Adding a new pattern type:** Edit `classifyLine()` and `kindLabel()` in `resultFinder.ts`, update `HandlingKind` union, update display in `extension.ts`, add tests in `src/test/classifyLine.test.ts`.
+- **Adding a new pattern type:** Edit `classifyLine()` and `kindLabel()` in `resultFinder.ts`, update `HandlingKind` union, update display in `extension.ts` (`kindLabelPlain()`), add tests in `src/test/classifyLine.test.ts`.
 - **Changing CodeLens appearance:** Edit `ResultCodeLensProvider` in `codeLensProvider.ts`.
 - **Modifying the quick-pick UI:** Edit `showResultPicker()` in `extension.ts`.
-- **Modifying export output:** Edit `formatJson()` / `formatMarkdown()` in `extension.ts`.
+- **Modifying export output:** Edit `formatJson()`, `formatMarkdown()`, or `formatMermaid()` in `extension.ts`.
+- **Modifying Mermaid diagram logic:** Edit `formatMermaid()` and `buildCallSiteIndex()` in `extension.ts`.
 - **Debugging search accuracy:** The two-tier search is in `findHandlingLocations()` in `resultFinder.ts`.
+- **Changing workspace scan scope:** Edit `buildGlobalResultTree()` in `resultFinder.ts` (path exclusion filters are there).
 - **Building:** Always run `npm run compile` before testing the extension; it loads from `./out/`, not `./src/`.
 - **Running tests:** `npm test` (no VSCode instance needed — uses vscode mock).
 - **Adding tests:** Follow the existing pattern in `src/test/classifyLine.test.ts`; place new test files under `src/test/` with a `.test.ts` suffix.
