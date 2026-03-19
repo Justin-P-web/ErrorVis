@@ -80,7 +80,7 @@ function classifyLine(lineText: string, symbol: string): HandlingKind | null {
  *
  * In both cases we filter the candidate lines through `classifyLine`.
  */
-async function findHandlingLocations(
+export async function findHandlingLocations(
   document: vscode.TextDocument,
   symbolName: string,
   position: vscode.Position,
