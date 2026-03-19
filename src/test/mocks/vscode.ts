@@ -32,4 +32,13 @@ export const commands = {
 
 export const workspace = {
   openTextDocument: async () => undefined,
+  asRelativePath: (uriOrPath: Uri | string): string => {
+    if (typeof uriOrPath === 'string') { return uriOrPath; }
+    return uriOrPath.fsPath;
+  },
 };
+
+export enum QuickPickItemKind {
+  Separator = -1,
+  Default = 0,
+}
