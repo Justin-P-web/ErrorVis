@@ -5,7 +5,7 @@ import { findHandlingLocations } from './resultFinder';
 // in lib: ["ES2020"] without @types/node; this declaration avoids a compile error.
 declare function setTimeout(callback: () => void, ms: number): unknown;
 
-const MAX_RETRY_COUNT = 6;   // give up after ~30 s (6 × 5 s)
+const MAX_RETRY_COUNT = 36;  // give up after ~3 min (36 × 5 s)
 const RETRY_DELAY_MS  = 5000;
 
 // Matches `fn name(` and captures the function name; line must also contain `-> Result<` or `-> Option<`
