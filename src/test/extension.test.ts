@@ -451,10 +451,10 @@ describe('formatMermaid()', () => {
     assert.ok(mmd.includes('graph TD'));
   });
 
-  it('emits classDef for source and danger styles', () => {
+  it('emits classDef for source and callsite styles', () => {
     const mmd = formatMermaid(makeSimpleTree())[0].content;
     assert.ok(mmd.includes('classDef source'));
-    assert.ok(mmd.includes('classDef danger'));
+    assert.ok(mmd.includes('classDef callsite'));
   });
 
   it('includes the file path as a comment in the diagram', () => {
@@ -473,13 +473,13 @@ describe('formatMermaid()', () => {
     assert.ok(mmd.includes('fn_parse_config["parse_config"]:::source'));
   });
 
-  it('emits a terminal handler node for each used kind', () => {
+  it('emits a location node for each call site', () => {
     const mmd = formatMermaid(makeSimpleTree())[0].content;
-    // unwrap and match are both used
-    assert.ok(mmd.includes('h_unwrap'), 'should have unwrap handler node');
-    assert.ok(mmd.includes('h_match'),  'should have match handler node');
-    // question_mark is not used in simple tree
-    assert.ok(!mmd.includes('h_question_mark'), 'should not emit unused handler nodes');
+    // unwrap at src/caller.rs:5 and match at src/caller.rs:20
+    assert.ok(mmd.includes('loc_src_caller_rs_5'),  'should have location node for line 5');
+    assert.ok(mmd.includes('loc_src_caller_rs_20'), 'should have location node for line 20');
+    // no handler-kind nodes
+    assert.ok(!mmd.includes('h_unwrap'), 'should not emit kind-based handler nodes');
   });
 
   it('emits edges from source to terminal handlers', () => {
@@ -512,10 +512,10 @@ describe('formatMermaid()', () => {
 
   it('emits propagation edge from source to passthrough', () => {
     const mmd = formatMermaid(makePropagatedTree())[0].content;
-    assert.ok(mmd.includes('fn_read_file -->|"?"| fn_process_file'));
+    assert.ok(mmd.includes('fn_read_file --> fn_process_file'));
   });
 
-  it('aggregates repeated edges with a count label', () => {
+  it('deduplicates edges to the same call-site location', () => {
     const tree: GlobalResultTree = {
       generatedAt: '2026-03-19T00:00:00.000Z',
       groups: [
@@ -530,6 +530,7 @@ describe('formatMermaid()', () => {
               line: 1,
               handling: [
                 makeHandling('unwrap', 'src/a.rs', 5),
+                makeHandling('unwrap', 'src/a.rs', 5), // duplicate same location
                 makeHandling('unwrap', 'src/b.rs', 10),
               ],
             },
@@ -538,7 +539,11 @@ describe('formatMermaid()', () => {
       ],
     };
     const mmd = formatMermaid(tree)[0].content;
-    // Two unwrap edges should be merged into "×2"
-    assert.ok(mmd.includes('×2'), 'repeated edges should show ×N count');
+    // Both distinct locations should appear as separate nodes
+    assert.ok(mmd.includes('loc_src_a_rs_5'),  'location node for src/a.rs:5');
+    assert.ok(mmd.includes('loc_src_b_rs_10'), 'location node for src/b.rs:10');
+    // Duplicate edge to src/a.rs:5 should appear only once
+    const edgeMatches = (mmd.match(/fn_do_thing --> loc_src_a_rs_5/g) ?? []).length;
+    assert.strictEqual(edgeMatches, 1, 'duplicate edge should be emitted only once');
   });
 });

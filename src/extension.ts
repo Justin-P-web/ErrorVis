@@ -248,8 +248,10 @@ export function formatMermaid(tree: GlobalResultTree): MermaidDiagram[] {
 }
 
 function formatMermaidForFile(filePath: string, groups: ResultGroup[]): string {
-  const safeId = (name: string) =>
+  const safeFnId = (name: string) =>
     'fn_' + name.replace(/[^a-zA-Z0-9]/g, '_');
+  const safeLocId = (locFilePath: string, line: number) =>
+    'loc_' + locFilePath.replace(/[^a-zA-Z0-9]/g, '_') + '_' + line;
 
   // Collect all source function names in this file
   const sourceFns = new Set<string>();
@@ -271,32 +273,46 @@ function formatMermaidForFile(filePath: string, groups: ResultGroup[]): string {
     }
   }
 
-  // Build edge map: (fromId, toId) → { label, count }
-  const edgeMap = new Map<string, { fromId: string; toId: string; label: string; count: number }>();
-  const addEdge = (fromId: string, toId: string, label: string) => {
+  // Collect all unique call-site locations keyed by filePath:line
+  const locationNodes = new Map<string, { nodeId: string; locFilePath: string; line: number; lineText: string }>();
+  for (const group of groups) {
+    for (const fn of group.functions) {
+      for (const loc of fn.handling) {
+        const locFilePath = vscode.workspace.asRelativePath(loc.uri);
+        const line = loc.range.start.line + 1;
+        const key = `${locFilePath}:${line}`;
+        if (!locationNodes.has(key)) {
+          locationNodes.set(key, { nodeId: safeLocId(locFilePath, line), locFilePath, line, lineText: loc.lineText });
+        }
+      }
+    }
+  }
+
+  // Build edge set: (fromId, toId) — deduplicated
+  const edgeSet = new Set<string>();
+  const edges: { fromId: string; toId: string }[] = [];
+  const addEdge = (fromId: string, toId: string) => {
     const key = `${fromId}→${toId}`;
-    const existing = edgeMap.get(key);
-    if (existing) {
-      existing.count++;
-    } else {
-      edgeMap.set(key, { fromId, toId, label, count: 1 });
+    if (!edgeSet.has(key)) {
+      edgeSet.add(key);
+      edges.push({ fromId, toId });
     }
   };
 
-  const usedKinds = new Set<HandlingKind>();
-
   for (const group of groups) {
     for (const fn of group.functions) {
-      const srcId = safeId(fn.fnName);
+      const srcId = safeFnId(fn.fnName);
       for (const loc of fn.handling) {
+        const locFilePath = vscode.workspace.asRelativePath(loc.uri);
+        const line = loc.range.start.line + 1;
+        const locNode = locationNodes.get(`${locFilePath}:${line}`)!;
         if (loc.via) {
-          const viaId = safeId(loc.via);
-          addEdge(srcId, viaId, '?');
-          addEdge(viaId, `h_${loc.kind}`, kindLabelPlain(loc.kind));
+          const viaId = safeFnId(loc.via);
+          addEdge(srcId, viaId);
+          addEdge(viaId, locNode.nodeId);
         } else {
-          addEdge(srcId, `h_${loc.kind}`, kindLabelPlain(loc.kind));
+          addEdge(srcId, locNode.nodeId);
         }
-        usedKinds.add(loc.kind);
       }
     }
   }
@@ -307,11 +323,7 @@ function formatMermaidForFile(filePath: string, groups: ResultGroup[]): string {
     'graph TD',
     '  classDef source fill:#4A90D9,stroke:#2C5F8A,color:#fff',
     '  classDef passthrough fill:#F5A623,stroke:#C67D0E,color:#333,stroke-dasharray:5 5',
-    '  classDef danger fill:#C0392B,stroke:#922B21,color:#fff',
-    '  classDef safe fill:#27AE60,stroke:#1E8449,color:#fff',
-    '  classDef combinator fill:#2980B9,stroke:#1A5276,color:#fff',
-    '  classDef check fill:#7F8C8D,stroke:#566573,color:#fff',
-    '  classDef propagate fill:#8E44AD,stroke:#6C3483,color:#fff',
+    '  classDef callsite fill:#ECF0F1,stroke:#95A5A6,color:#333',
     '',
     '  %% Source functions (return Result/Option)',
   ];
@@ -328,7 +340,7 @@ function formatMermaidForFile(filePath: string, groups: ResultGroup[]): string {
       const sgId = 'sg_' + group.label.replace(/[^a-zA-Z0-9]/g, '_');
       lines.push(`    subgraph ${sgId} ["${group.label}"]`);
       for (const fn of group.functions) {
-        lines.push(`      ${safeId(fn.fnName)}["${fn.fnName}"]:::source`);
+        lines.push(`      ${safeFnId(fn.fnName)}["${fn.fnName}"]:::source`);
         emittedFns.add(fn.fnName);
       }
       lines.push('    end');
@@ -340,7 +352,7 @@ function formatMermaidForFile(filePath: string, groups: ResultGroup[]): string {
     if (group.kind === 'file') {
       for (const fn of group.functions) {
         if (!emittedFns.has(fn.fnName)) {
-          lines.push(`    ${safeId(fn.fnName)}["${fn.fnName}"]:::source`);
+          lines.push(`    ${safeFnId(fn.fnName)}["${fn.fnName}"]:::source`);
           emittedFns.add(fn.fnName);
         }
       }
@@ -353,37 +365,38 @@ function formatMermaidForFile(filePath: string, groups: ResultGroup[]): string {
     lines.push('');
     lines.push('  %% Pass-through functions (propagate without handling)');
     for (const fn of passthroughFns) {
-      lines.push(`  ${safeId(fn)}(["${fn}"]):::passthrough`);
+      lines.push(`  ${safeFnId(fn)}(["${fn}"]):::passthrough`);
     }
   }
 
-  // Terminal handler node definitions
-  const kindDef: Record<HandlingKind, { shape: [string, string]; cls: string }> = {
-    unwrap:         { shape: ['{{', '}}'], cls: 'danger' },
-    expect:         { shape: ['{{', '}}'], cls: 'danger' },
-    unwrap_or:      { shape: ['{', '}'],   cls: 'safe' },
-    map_combinator: { shape: ['[/', '/]'], cls: 'combinator' },
-    question_mark:  { shape: ['([', '])'], cls: 'propagate' },
-    return:         { shape: ['([', '])'], cls: 'propagate' },
-    match:          { shape: ['{', '}'],   cls: 'safe' },
-    if_let:         { shape: ['{', '}'],   cls: 'safe' },
-    while_let:      { shape: ['{', '}'],   cls: 'safe' },
-    check:          { shape: ['[', ']'],   cls: 'check' },
-  };
+  // Group call-site nodes by their file into subgraphs
+  type LocNode = { nodeId: string; locFilePath: string; line: number; lineText: string };
+  const byLocFile = new Map<string, LocNode[]>();
+  for (const node of locationNodes.values()) {
+    const arr = byLocFile.get(node.locFilePath) ?? [];
+    arr.push(node);
+    byLocFile.set(node.locFilePath, arr);
+  }
 
-  lines.push('');
-  lines.push('  %% Terminal handling nodes');
-  for (const kind of usedKinds) {
-    const { shape: [open, close], cls } = kindDef[kind];
-    const label = kindLabelPlain(kind);
-    lines.push(`  h_${kind}${open}"${label}"${close}:::${cls}`);
+  if (locationNodes.size > 0) {
+    lines.push('');
+    lines.push('  %% Call-site location nodes');
+    for (const [locFile, nodes] of byLocFile) {
+      const sgId = 'sg_locs_' + locFile.replace(/[^a-zA-Z0-9]/g, '_');
+      const shortFile = path.basename(locFile);
+      lines.push(`  subgraph ${sgId} ["${locFile}"]`);
+      for (const node of nodes.sort((a, b) => a.line - b.line)) {
+        const label = `${shortFile}:${node.line}`;
+        lines.push(`    ${node.nodeId}["${label}"]:::callsite`);
+      }
+      lines.push('  end');
+    }
   }
 
   lines.push('');
   lines.push('  %% Error flow edges');
-  for (const { fromId, toId, label, count } of edgeMap.values()) {
-    const edgeLabel = count > 1 ? `${label} ×${count}` : label;
-    lines.push(`  ${fromId} -->|"${edgeLabel}"| ${toId}`);
+  for (const { fromId, toId } of edges) {
+    lines.push(`  ${fromId} --> ${toId}`);
   }
 
   return lines.join('\n');
