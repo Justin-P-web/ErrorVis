@@ -42,7 +42,7 @@ function buildPattern(template: RegExp, symbol: string): RegExp {
   return new RegExp(template.source.replace('SYMBOL', escaped), template.flags);
 }
 
-function classifyLine(lineText: string, symbol: string): HandlingKind | null {
+export function classifyLine(lineText: string, symbol: string): HandlingKind | null {
   if (buildPattern(QUESTION_MARK_PATTERN, symbol).test(lineText)) {
     return 'question_mark';
   }

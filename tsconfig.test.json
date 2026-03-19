@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./out-test",
+    "paths": {
+      "vscode": ["./src/test/mocks/vscode.ts"]
+    },
+    "baseUrl": "."
+  },
+  "include": ["src/**/*.ts"]
+}
