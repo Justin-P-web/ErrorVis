@@ -285,7 +285,7 @@ function formatMermaidForFile(filePath: string, groups: ResultGroup[]): string {
   for (const group of groups) {
     for (const fn of group.functions) {
       for (const loc of fn.handling) {
-        if (loc.kind === 'question_mark' || loc.kind === 'return') { continue; }
+        if ((loc.kind === 'question_mark' || loc.kind === 'return') && loc.depth > 0) { continue; }
         const locFilePath = vscode.workspace.asRelativePath(loc.uri);
         if (loc.inFunction) {
           const key = loc.inFunction;
